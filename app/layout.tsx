@@ -18,6 +18,9 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "VLESSer - Защищённый доступ за 30 секунд",
   description: "VLESSer — премиальный VLESS VPN с высокой скоростью и безопасностью",
+  other: {
+    "selfwork.ru": "Ys4Tjtcwr53LsDgCxwKDnD5UwkEzXwMHZKmKf3xoF46Nv9tORr",
+  },
 };
 
 export default function RootLayout({

@@ -41,16 +41,16 @@ export async function GET(request: NextRequest) {
     const response = NextResponse.redirect(redirectUrl, 302);
     
     // Копируем cookies для сохранения сессии
+    // RequestCookie содержит только name и value, поэтому используем значения по умолчанию
     try {
       request.cookies.getAll().forEach(cookie => {
         try {
           response.cookies.set(cookie.name, cookie.value, {
-            path: cookie.path || '/',
-            domain: cookie.domain,
-            sameSite: (cookie.sameSite as any) || 'lax',
-            secure: cookie.secure !== undefined ? cookie.secure : (protocol === 'https'),
-            httpOnly: cookie.httpOnly !== undefined ? cookie.httpOnly : true,
-            maxAge: cookie.maxAge || 60 * 60 * 24 * 7,
+            path: '/',
+            sameSite: 'lax',
+            secure: protocol === 'https',
+            httpOnly: true,
+            maxAge: 60 * 60 * 24 * 7, // 7 дней
           });
         } catch (e) {
           // Игнорируем ошибки отдельных cookies

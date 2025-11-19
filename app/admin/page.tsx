@@ -4,7 +4,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { createClient } from "@/lib/supabase/client";
-import { Users, ShoppingCart, Key, Search, DollarSign, TrendingUp, Ticket, Plus, Trash2, Shield } from "lucide-react";
+import { Users, ShoppingCart, Key, Search, DollarSign, TrendingUp, Ticket, Plus, Trash2, Shield, LifeBuoy, MessageSquare } from "lucide-react";
 import { format } from "date-fns";
 import { motion } from "framer-motion";
 import { Plan } from "@/types/database";
@@ -34,6 +34,14 @@ export default function AdminPage() {
     expires_at: "",
     min_amount: null as number | null,
   });
+  const [tickets, setTickets] = useState<any[]>([]);
+  const [ticketFilter, setTicketFilter] = useState("open");
+  const [loadingTickets, setLoadingTickets] = useState(false);
+  const [selectedTicket, setSelectedTicket] = useState<any | null>(null);
+  const [ticketMessages, setTicketMessages] = useState<any[]>([]);
+  const [ticketReply, setTicketReply] = useState("");
+  const getAdminHeaderToken = () => adminToken || localStorage.getItem("admin_token") || "";
+  const shortTicketId = (id: string) => `#${id?.split("-")[0]}`;
   const supabase = createClient();
 
   useEffect(() => {
@@ -45,6 +53,13 @@ export default function AdminPage() {
       loadData();
     }
   }, []);
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      loadTickets(ticketFilter);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated, ticketFilter]);
 
   const handleAdminLogin = async () => {
     // Проверяем токен через API
@@ -102,6 +117,96 @@ export default function AdminPage() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const loadTickets = async (status = ticketFilter) => {
+    if (!isAuthenticated) return;
+    setLoadingTickets(true);
+    try {
+      const res = await fetch(`/api/support/admin/tickets?status=${status}`, {
+        headers: { "x-admin-token": getAdminHeaderToken() },
+      });
+      if (!res.ok) throw new Error("Failed to load tickets");
+      const data = await res.json();
+      setTickets(data.tickets || []);
+      if (selectedTicket) {
+        const updated = data.tickets?.find((t: any) => t.id === selectedTicket.id);
+        if (updated) setSelectedTicket(updated);
+      }
+    } catch (error) {
+      console.error("Error loading tickets:", error);
+    } finally {
+      setLoadingTickets(false);
+    }
+  };
+
+  const loadTicketMessages = async (ticketId: string) => {
+    try {
+      const res = await fetch(`/api/support/admin/tickets/${ticketId}/messages`, {
+        headers: { "x-admin-token": getAdminHeaderToken() },
+      });
+      if (!res.ok) throw new Error("Failed to load messages");
+      const data = await res.json();
+      setSelectedTicket(data.ticket);
+      setTicketMessages(data.messages || []);
+    } catch (error) {
+      console.error("Error loading ticket messages:", error);
+    }
+  };
+
+  const handleSelectTicket = async (ticket: any) => {
+    setSelectedTicket(ticket);
+    setTicketReply("");
+    await loadTicketMessages(ticket.id);
+  };
+
+  const handleSendTicketReply = async () => {
+    if (!selectedTicket || !ticketReply.trim()) return;
+    try {
+      const res = await fetch(`/api/support/admin/tickets/${selectedTicket.id}/reply`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-admin-token": getAdminHeaderToken(),
+        },
+        body: JSON.stringify({ message: ticketReply.trim(), adminName: "Администратор" }),
+      });
+      if (!res.ok) throw new Error("Failed to send reply");
+      setTicketReply("");
+      await loadTicketMessages(selectedTicket.id);
+      await loadTickets(ticketFilter);
+    } catch (error) {
+      console.error("Error sending reply:", error);
+      alert("Не удалось отправить ответ");
+    }
+  };
+
+  const handleChangeTicketStatus = async (ticketId: string, status: string) => {
+    try {
+      const res = await fetch(`/api/support/admin/tickets/${ticketId}/status`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-admin-token": getAdminHeaderToken(),
+        },
+        body: JSON.stringify({ status }),
+      });
+      if (!res.ok) throw new Error("Failed to update status");
+      if (selectedTicket?.id === ticketId) {
+        await loadTicketMessages(ticketId);
+      }
+      await loadTickets(ticketFilter);
+    } catch (error) {
+      console.error("Error updating ticket status:", error);
+      alert("Не удалось обновить статус");
+    }
+  };
+
+  const ticketStatusLabels: Record<string, string> = {
+    open: "Новый",
+    pending: "В работе",
+    answered: "Есть ответ",
+    closed: "Закрыт",
   };
 
   const handleCreatePromocode = async () => {
@@ -508,6 +613,150 @@ export default function AdminPage() {
                   </Button>
                 </div>
               ))}
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Поддержка */}
+        <Card className="mb-6">
+          <CardHeader>
+            <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+              <div className="flex items-center space-x-2">
+                <LifeBuoy className="w-5 h-5" />
+                <div>
+                  <CardTitle>Обращения пользователей</CardTitle>
+                  <CardDescription>Управляйте тикетами из Telegram-бота</CardDescription>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {["open", "pending", "answered", "closed", "all"].map((status) => (
+                  <Button
+                    key={status}
+                    variant={ticketFilter === status ? "default" : "outline"}
+                    size="sm"
+                    onClick={() => setTicketFilter(status)}
+                  >
+                    {ticketStatusLabels[status] || "Все"}
+                  </Button>
+                ))}
+                <Button variant="ghost" size="sm" onClick={() => loadTickets(ticketFilter)}>
+                  ↻ Обновить
+                </Button>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div className="space-y-3 max-h-[520px] overflow-y-auto pr-1">
+                {loadingTickets && <div className="text-gray-400 text-sm">Загрузка обращений...</div>}
+                {!loadingTickets && tickets.length === 0 && (
+                  <div className="text-gray-500 text-sm">Нет обращений с выбранным статусом.</div>
+                )}
+                {tickets.map((ticket) => (
+                  <div
+                    key={ticket.id}
+                    className={`p-4 rounded-xl border ${selectedTicket?.id === ticket.id ? "border-blue-500 bg-blue-500/5" : "border-gray-800 bg-[#0a0a0a]"}`}
+                  >
+                    <div className="flex items-start justify-between mb-2">
+                      <div>
+                        <p className="font-semibold">{ticket.subject}</p>
+                        <p className="text-xs text-gray-400">
+                          {shortTicketId(ticket.id)} • {ticket.category}
+                        </p>
+                        <p className="text-xs text-gray-500">
+                          Пользователь: {ticket.username || "—"} (TG: {ticket.tg_id})
+                        </p>
+                      </div>
+                      <span className="text-xs px-2 py-1 rounded bg-gray-800 text-gray-200">
+                        {ticketStatusLabels[ticket.status] || ticket.status}
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-500 mb-3">
+                      Создано: {format(new Date(ticket.created_at), "dd.MM.yyyy HH:mm")}
+                    </p>
+                    <div className="flex items-center justify-between">
+                      <Button size="sm" variant="outline" onClick={() => handleSelectTicket(ticket)}>
+                        Просмотр
+                      </Button>
+                      {ticket.status !== "closed" && (
+                        <Button size="sm" variant="ghost" onClick={() => handleChangeTicketStatus(ticket.id, "closed")}>
+                          Закрыть
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="border border-gray-800 rounded-xl p-4 bg-[#0a0a0a] min-h-[420px]">
+                {selectedTicket ? (
+                  <>
+                    <div className="flex items-start justify-between mb-4">
+                      <div>
+                        <h3 className="text-xl font-semibold">{shortTicketId(selectedTicket.id)}</h3>
+                        <p className="text-sm text-gray-400">
+                          Пользователь: {selectedTicket.username || "—"}
+                        </p>
+                        <p className="text-xs text-gray-500">Telegram ID: {selectedTicket.tg_id}</p>
+                      </div>
+                      <span className="text-xs px-3 py-1 rounded bg-gray-800 text-gray-200">
+                        {ticketStatusLabels[selectedTicket.status] || selectedTicket.status}
+                      </span>
+                    </div>
+                    <div className="max-h-64 overflow-y-auto border border-gray-800 rounded-lg p-3 mb-4 space-y-3">
+                      {ticketMessages.map((message) => (
+                        <div key={message.id} className="text-sm">
+                          <p className="text-gray-400 text-xs flex items-center gap-1">
+                            <MessageSquare className="w-3 h-3" />
+                            {message.author_type === "admin" ? "Админ" : "Пользователь"}
+                            <span className="text-gray-500">
+                              • {format(new Date(message.created_at), "dd.MM.yyyy HH:mm")}
+                            </span>
+                          </p>
+                          <p className="text-gray-100 whitespace-pre-line">{message.message}</p>
+                        </div>
+                      ))}
+                      {!ticketMessages.length && (
+                        <p className="text-gray-500 text-sm">Нет сообщений в этом тикете.</p>
+                      )}
+                    </div>
+                    <div className="space-y-3">
+                      <textarea
+                        className="w-full rounded-lg border border-gray-800 bg-transparent p-3 text-sm text-gray-100"
+                        rows={4}
+                        placeholder="Введите ответ..."
+                        value={ticketReply}
+                        onChange={(e) => setTicketReply(e.target.value)}
+                      />
+                      <div className="flex items-center gap-2">
+                        <Button onClick={handleSendTicketReply} disabled={!ticketReply.trim()}>
+                          Отправить ответ
+                        </Button>
+                        {selectedTicket.status !== "pending" && selectedTicket.status !== "open" && (
+                          <Button
+                            variant="outline"
+                            onClick={() => handleChangeTicketStatus(selectedTicket.id, "pending")}
+                          >
+                            Пометить как в работе
+                          </Button>
+                        )}
+                        {selectedTicket.status !== "closed" && (
+                          <Button
+                            variant="ghost"
+                            onClick={() => handleChangeTicketStatus(selectedTicket.id, "closed")}
+                          >
+                            Закрыть тикет
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-gray-500 text-sm h-full flex items-center justify-center">
+                    Выберите тикет слева, чтобы просмотреть диалог и ответить пользователю.
+                  </div>
+                )}
+              </div>
             </div>
           </CardContent>
         </Card>

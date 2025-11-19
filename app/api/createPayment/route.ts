@@ -13,6 +13,12 @@ async function generatePaymentUrl(
   baseUrl: string
 ): Promise<string | null> {
   try {
+    // Проверка, что plan не undefined
+    if (!plan) {
+      console.error("❌ Plan is undefined");
+      return null;
+    }
+
     // ВАЖНО: Убеждаемся, что amount - это число (плавающая точка), а не строка
     const amountNumber = Number(amount);
     if (isNaN(amountNumber) || amountNumber <= 0) {
@@ -22,11 +28,33 @@ async function generatePaymentUrl(
 
     // Получаем настройки Robokassa
     // ВАЖНО: Убираем все пробелы, включая начальные и конечные
+    
+    // Читаем тестовый режим: убираем пробелы и комментарии, проверяем "true" (регистронезависимо)
+    const testModeRaw = (process.env.ROBOKASSA_TEST_MODE || "").trim().toLowerCase();
+    // Убираем комментарии (всё после #)
+    const testModeValue = testModeRaw.split('#')[0].trim();
+    const isTest = testModeValue === "true";
+    
+    // ВАЖНО: В тестовом режиме нужно использовать ТОЛЬКО тестовые пароли!
+    // Согласно документации Robokassa: "Если вы используете тестовую среду Robokassa,
+    // передавая параметр IsTest=1, то необходимо использовать только тестовую пару технических паролей"
+    // Если ROBOKASSA_TEST_PASSWORD_1 не указан, используем ROBOKASSA_PASSWORD_1 (который должен быть тестовым)
+    const password_1Raw = isTest 
+      ? (process.env.ROBOKASSA_TEST_PASSWORD_1 || process.env.ROBOKASSA_PASSWORD_1 || "")
+      : (process.env.ROBOKASSA_PASSWORD_1 || "");
+    
     const merchantLoginRaw = process.env.ROBOKASSA_MERCHANT_LOGIN || "";
-    const password_1Raw = process.env.ROBOKASSA_PASSWORD_1 || "";
     const merchantLogin = merchantLoginRaw.trim();
     const password_1 = password_1Raw.trim();
-    const isTest = process.env.ROBOKASSA_TEST_MODE === "true";
+    
+    console.log("🧪 Test mode check:", {
+      raw: process.env.ROBOKASSA_TEST_MODE,
+      trimmed: testModeRaw,
+      value: testModeValue,
+      isTest: isTest,
+      usingTestPassword: isTest && !!process.env.ROBOKASSA_TEST_PASSWORD_1,
+      passwordSource: isTest ? "TEST_PASSWORD_1 or PASSWORD_1" : "PASSWORD_1",
+    });
 
     // Детальная проверка параметров
     if (!merchantLogin) {
@@ -86,6 +114,12 @@ async function generatePaymentUrl(
     // Согласно документации: максимальная длина 100 символов
     // Описание должно содержать только символы английского или русского алфавита, цифры и знаки препинания
     // Но в подпись оно НЕ входит, поэтому можно использовать любые символы
+    // Проверяем, что plan не undefined (должно быть проверено выше, но TypeScript требует явной проверки)
+    if (!plan) {
+      console.error("❌ Plan is undefined when creating description");
+      return null;
+    }
+    
     let description = `VLESS VPN подписка: ${plan.name} (${plan.duration} дней)`;
     
     // Обрезаем описание до 100 символов, если оно слишком длинное

@@ -4,7 +4,7 @@ export const plans: Plan[] = [
   {
     id: "start",
     name: "Старт",
-    price: 299,
+    price: 99,
     duration: 30,
     features: [
       "30 дней доступа",
@@ -16,7 +16,7 @@ export const plans: Plan[] = [
   {
     id: "premium",
     name: "Премиум",
-    price: 799,
+    price: 199,
     duration: 90,
     features: [
       "90 дней доступа",
@@ -30,7 +30,7 @@ export const plans: Plan[] = [
   {
     id: "unlimited",
     name: "Безлимит",
-    price: 1999,
+    price: 599,
     duration: 365,
     features: [
       "365 дней доступа",
