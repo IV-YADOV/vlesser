@@ -19,9 +19,18 @@ BRANCH="master"
 
 echo -e "${YELLOW}📥 Обновление кода из GitHub...${NC}"
 cd "$PROJECT_DIR"
-git fetch origin
-git reset --hard origin/$BRANCH
-git clean -fd
+
+# Если директория не существует, клонируем репозиторий
+if [ ! -d ".git" ]; then
+    echo "Клонирование репозитория..."
+    cd ..
+    rm -rf "$(basename $PROJECT_DIR)"
+    git clone $REPO_URL "$(basename $PROJECT_DIR)"
+    cd "$PROJECT_DIR"
+else
+    # Если репозиторий уже существует, просто обновляем
+    git pull origin $BRANCH
+fi
 
 echo -e "${YELLOW}📦 Установка зависимостей Node.js...${NC}"
 npm install --production

@@ -11,10 +11,23 @@ $PROJECT_DIR = "C:\path\to\vpn_bot"  # Измените на путь к про�
 $BRANCH = "master"
 
 Write-Host "📥 Обновление кода из GitHub..." -ForegroundColor Yellow
-Set-Location $PROJECT_DIR
-git fetch origin
-git reset --hard "origin/$BRANCH"
-git clean -fd
+
+# Если директория не существует, клонируем репозиторий
+if (-not (Test-Path "$PROJECT_DIR\.git")) {
+    Write-Host "Клонирование репозитория..." -ForegroundColor Cyan
+    $parentDir = Split-Path -Parent $PROJECT_DIR
+    $folderName = Split-Path -Leaf $PROJECT_DIR
+    Set-Location $parentDir
+    if (Test-Path $folderName) {
+        Remove-Item -Recurse -Force $folderName
+    }
+    git clone $REPO_URL $folderName
+    Set-Location $PROJECT_DIR
+} else {
+    # Если репозиторий уже существует, просто обновляем
+    Set-Location $PROJECT_DIR
+    git pull origin $BRANCH
+}
 
 Write-Host "📦 Установка зависимостей Node.js..." -ForegroundColor Yellow
 npm install --production
