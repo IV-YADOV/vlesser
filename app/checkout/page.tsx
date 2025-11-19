@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { motion } from "framer-motion";
 import { useState, useEffect, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
-import { Check, Copy, CheckCircle2, Loader2, ArrowLeft } from "lucide-react";
+import { Check, Loader2, ArrowLeft } from "lucide-react";
 import { Plan } from "@/types/database";
 import Link from "next/link";
 import { TelegramUser, validateTelegramAuth, getUserIdFromTelegram } from "@/lib/auth";
@@ -16,11 +16,8 @@ function CheckoutContent() {
   const planId = searchParams.get("plan") || "premium";
   const { plans: planData } = usePlans();
   const [selectedPlan, setSelectedPlan] = useState<Plan | null>(null);
-  const [step, setStep] = useState<"select" | "payment" | "success">("select");
   const [paymentId, setPaymentId] = useState<string | null>(null);
-  const [vlessLink, setVlessLink] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [copied, setCopied] = useState(false);
   const [user, setUser] = useState<TelegramUser | null>(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [promocode, setPromocode] = useState("");
@@ -113,11 +110,12 @@ function CheckoutContent() {
       alert("Требуется авторизация для оформления заказа");
       return;
     }
+    
     setLoading(true);
     try {
       const userId = getUserIdFromTelegram(user);
       
-      // Create payment
+      // Создаем платеж и получаем URL для редиректа на Robokassa
       const paymentRes = await fetch("/api/createPayment", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -128,7 +126,6 @@ function CheckoutContent() {
         }),
       });
 
-      // Check if response is ok and has content
       if (!paymentRes.ok) {
         const errorText = await paymentRes.text();
         let errorData;
@@ -141,69 +138,27 @@ function CheckoutContent() {
       }
 
       const paymentData = await paymentRes.json();
+      
+      if (!paymentData.paymentUrl) {
+        throw new Error("Payment URL not received");
+      }
+
       if (!paymentData.paymentId) {
         throw new Error("Payment ID not received");
       }
 
+      // Сохраняем paymentId для дальнейшего использования
       setPaymentId(paymentData.paymentId);
-      setStep("payment");
 
-      // Simulate payment processing
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-
-      // Complete payment
-      const completeRes = await fetch("/api/completePayment", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ paymentId: paymentData.paymentId, userId }),
-      });
-
-      if (!completeRes.ok) {
-        const errorText = await completeRes.text();
-        let errorData;
-        try {
-          errorData = JSON.parse(errorText);
-        } catch {
-          errorData = { error: errorText || "Unknown error" };
-        }
-        throw new Error(errorData.error || `HTTP ${completeRes.status}`);
-      }
-
-      const completeData = await completeRes.json();
-      if (!completeData.vlessLink) {
-        throw new Error("VLESS link not received");
-      }
-
-      // Применяем промокод, если был использован
-      if (paymentData.promocode) {
-        try {
-          await fetch("/api/promocodes/apply", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ code: paymentData.promocode }),
-          });
-        } catch (error) {
-          console.error("Error applying promocode:", error);
-          // Не прерываем процесс, если не удалось применить промокод
-        }
-      }
-
-      setVlessLink(completeData.vlessLink);
-      setStep("success");
+      // Редирект на страницу оплаты Robokassa
+      window.location.href = paymentData.paymentUrl;
     } catch (error: any) {
       console.error("Payment error:", error);
       alert("Ошибка при обработке платежа: " + (error.message || "Неизвестная ошибка"));
-    } finally {
       setLoading(false);
     }
   };
 
-  const copyToClipboard = async () => {
-    if (!vlessLink) return;
-    await navigator.clipboard.writeText(vlessLink);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
 
   // Проверка авторизации
   if (checkingAuth) {
@@ -243,73 +198,6 @@ function CheckoutContent() {
     );
   }
 
-  if (step === "success" && vlessLink) {
-    return (
-      <div className="pt-32 pb-20 px-4 sm:px-6 lg:px-8">
-          <div className="container mx-auto max-w-2xl">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              className="text-center mb-8"
-            >
-              <div className="w-20 h-20 rounded-full bg-green-500/20 flex items-center justify-center mx-auto mb-6">
-                <CheckCircle2 className="w-10 h-10 text-green-500" />
-              </div>
-              <h1 className="text-4xl font-bold mb-4">
-                Оплата <span className="gradient-text">успешна!</span>
-              </h1>
-              <p className="text-xl text-gray-400">
-                Ваш VLESS конфиг готов к использованию
-              </p>
-            </motion.div>
-            <Card className="mb-6">
-              <CardHeader>
-                <CardTitle>Ваш VLESS конфиг</CardTitle>
-                <CardDescription>
-                  Скопируйте эту ссылку и импортируйте в приложение
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="bg-[#0a0a0a] rounded-lg p-4 mb-4 border border-gray-800">
-                  <code className="text-sm text-gray-300 break-all">
-                    {vlessLink}
-                  </code>
-                </div>
-                <Button
-                  onClick={copyToClipboard}
-                  className="w-full"
-                  variant={copied ? "secondary" : "default"}
-                >
-                  {copied ? (
-                    <>
-                      <Check className="mr-2 w-4 h-4" />
-                      Скопировано!
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="mr-2 w-4 h-4" />
-                      Скопировать конфиг
-                    </>
-                  )}
-                </Button>
-              </CardContent>
-            </Card>
-            <div className="text-center space-y-4">
-              <Link href="/instructions">
-                <Button variant="outline" className="w-full">
-                  Как подключить? Смотрите инструкцию
-                </Button>
-              </Link>
-              <Link href="/">
-                <Button variant="ghost" className="w-full">
-                  Вернуться на главную
-                </Button>
-              </Link>
-            </div>
-          </div>
-      </div>
-    );
-  }
 
   return (
     <div className="pt-32 pb-20 px-4 sm:px-6 lg:px-8">

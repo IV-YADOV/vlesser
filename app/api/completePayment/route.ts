@@ -18,7 +18,15 @@ export async function POST(request: NextRequest) {
   try {
     const { paymentId, userId } = await request.json();
 
+    console.log("📥 completePayment called:", {
+      paymentId,
+      userId,
+      hasPaymentId: !!paymentId,
+      hasUserId: !!userId,
+    });
+
     if (!paymentId || !userId) {
+      console.error("❌ Missing paymentId or userId in completePayment");
       return NextResponse.json(
         { error: "Missing paymentId or userId" },
         { status: 400 }
@@ -58,41 +66,56 @@ export async function POST(request: NextRequest) {
         });
     }
 
-    if (payment.status === "completed") {
-      // Return existing subscription
-      const { data: subscription } = await supabase
-        .from("subscriptions")
-        .select("*")
-        .eq("user_id", userId)
-        .eq("plan", payment.plan)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .single();
+    // ВАЖНО: В production режиме completePayment вызывается только после подтверждения оплаты через callback
+    // Статус "completed" устанавливается ТОЛЬКО через callback от Robokassa (ResultURL)
+    // НЕ обновляем статус автоматически - это должен делать только callback
 
-      if (subscription) {
-        return NextResponse.json({
-          vlessLink: subscription.vless_link,
-          expiresAt: subscription.expires_at,
-        });
-      }
+    // Проверяем статус платежа - в production только completed платежи могут быть обработаны
+    if (payment.status !== "completed") {
+      console.error("❌ Attempted to complete payment with status:", payment.status);
+      console.error("Payment must be marked as 'completed' by Robokassa callback (ResultURL) first");
+      console.error("Payment details:", {
+        id: payment.id,
+        status: payment.status,
+        amount: payment.amount,
+        created_at: payment.created_at,
+      });
+      return NextResponse.json(
+        {
+          error: "Payment is not completed. Status: " + payment.status + ". Payment must be confirmed by Robokassa callback first.",
+        },
+        { status: 400 }
+      );
     }
 
-    // Update payment status
-    await supabase
-      .from("payments")
-      .update({ status: "completed" })
-      .eq("id", paymentId);
+    // ВАЖНО: Всегда создаем новую подписку для каждого платежа
+    // Не проверяем существующие подписки - каждый платеж создает новую подписку и xray клиента
+    console.log("✅ Payment completed, creating new subscription and xray client...");
 
     // Get plan
     const plan = getPlanById(payment.plan);
     if (!plan) {
+      console.error("❌ Invalid plan:", payment.plan);
       return NextResponse.json({ error: "Invalid plan" }, { status: 400 });
     }
+
+    console.log("📋 Plan details:", {
+      planId: plan.id,
+      planName: plan.name,
+      duration: plan.duration,
+      userId: userId,
+    });
 
     // Generate VLESS link через Python сервис
     let vlessLink: string;
     
     const pythonServiceUrl = process.env.PYTHON_XRAY_SERVICE_URL || "http://localhost:5000";
+    
+    console.log(`🔄 Calling Python xray service: ${pythonServiceUrl}/create-client`);
+    console.log("📋 Python service request params:", {
+      email: userId,
+      days: plan.duration,
+    });
     
     try {
       // Вызываем Python сервис для создания клиента в xray
@@ -130,31 +153,62 @@ export async function POST(request: NextRequest) {
     const expiresAt = addDays(new Date(), plan.duration).toISOString();
 
     // Create subscription
-    const { data: subscription, error: subError } = await supabase
+    // Пробуем сначала с payment_id, если ошибка - без него
+    let subscriptionData: any = {
+      user_id: userId,
+      plan: payment.plan,
+      expires_at: expiresAt,
+      vless_link: vlessLink,
+      payment_id: payment.id,
+    };
+
+    let { data: newSubscription, error: subError } = await supabase
       .from("subscriptions")
-      .insert({
+      .insert(subscriptionData)
+      .select()
+      .single();
+
+    // Если ошибка из-за отсутствующей колонки payment_id, пробуем без неё
+    if (subError && (subError.code === "PGRST204" || subError.message?.includes("payment_id"))) {
+      console.warn("⚠️ payment_id column not found, creating subscription without it");
+      subscriptionData = {
         user_id: userId,
         plan: payment.plan,
         expires_at: expiresAt,
         vless_link: vlessLink,
-      })
-      .select()
-      .single();
+      };
+      
+      const { data: subscriptionWithoutPaymentId, error: retryError } = await supabase
+        .from("subscriptions")
+        .insert(subscriptionData)
+        .select()
+        .single();
 
-    if (subError) {
+      if (retryError) {
+        console.error("Error creating subscription (without payment_id):", retryError);
+        return NextResponse.json(
+          { error: "Failed to create subscription: " + (retryError.message || "Unknown error") },
+          { status: 500 }
+        );
+      }
+
+      newSubscription = subscriptionWithoutPaymentId;
+    } else if (subError) {
+      console.error("Error creating subscription:", subError);
       return NextResponse.json(
-        { error: "Failed to create subscription" },
+        { error: "Failed to create subscription: " + (subError.message || "Unknown error") },
         { status: 500 }
       );
     }
 
     return NextResponse.json({
-      vlessLink: subscription.vless_link,
-      expiresAt: subscription.expires_at,
+      vlessLink: newSubscription.vless_link,
+      expiresAt: newSubscription.expires_at,
     });
-  } catch (error) {
+  } catch (error: any) {
+    console.error("Complete payment handler error:", error);
     return NextResponse.json(
-      { error: "Internal server error" },
+      { error: "Internal server error: " + (error.message || "Unknown error") },
       { status: 500 }
     );
   }
