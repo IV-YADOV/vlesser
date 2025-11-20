@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { YooKassaWebhookNotification, verifyYooKassaWebhookSignature } from "@/lib/yookassa";
+import { YooKassaWebhookNotification, verifyYooKassaWebhookSignature, captureYooKassaPayment } from "@/lib/yookassa";
 
 /**
  * Webhook для обработки уведомлений от ЮKassa
@@ -119,13 +119,29 @@ export async function POST(request: NextRequest) {
 
     // Обрабатываем событие в зависимости от статуса
     // Согласно документации YooKassa: payment.succeeded, payment.waiting_for_capture, payment.canceled
-    if ((notification.event === "payment.succeeded" && status === "succeeded") ||
-        (notification.event === "payment.waiting_for_capture" && status === "waiting_for_capture")) {
-      // Платеж успешен или ожидает подтверждения (capture)
-      // В обоих случаях считаем платеж успешным и обновляем статус
+    if (notification.event === "payment.waiting_for_capture" && status === "waiting_for_capture") {
+      // Платеж ожидает подтверждения (capture) - автоматически подтверждаем
+      console.log(`🔄 Payment ${payment.id} waiting for capture, attempting to capture...`);
+      
+      const shopId = process.env.YOOKASSA_SHOP_ID?.trim() || "";
+      const secretKey = process.env.YOOKASSA_SECRET_KEY?.trim() || "";
+      
+      if (shopId && secretKey) {
+        // Автоматически подтверждаем платеж
+        const capturedPayment = await captureYooKassaPayment(paymentId, shopId, secretKey);
+        
+        if (capturedPayment && capturedPayment.status === "succeeded") {
+          console.log(`✅ Payment ${payment.id} captured successfully, status: ${capturedPayment.status}`);
+        } else {
+          console.warn(`⚠️ Payment ${payment.id} capture failed or returned unexpected status`);
+        }
+      } else {
+        console.error("❌ YooKassa credentials not configured, cannot capture payment");
+      }
+      
+      // Обновляем статус платежа на completed, так как capture был выполнен
       if (payment.status !== "completed") {
-        const eventType = notification.event === "payment.succeeded" ? "succeeded" : "waiting_for_capture";
-        console.log(`✅ Payment ${payment.id} ${eventType}, updating to completed`);
+        console.log(`✅ Payment ${payment.id} captured, updating to completed`);
 
         const { error: updateError } = await supabase
           .from("payments")
@@ -200,7 +216,84 @@ export async function POST(request: NextRequest) {
           });
         }
       }
-    } else if (notification.event === "payment.canceled" && status === "canceled") {
+    } else if (notification.event === "payment.succeeded" && status === "succeeded") {
+      // Платеж успешно завершен (уже подтвержден)
+      if (payment.status !== "completed") {
+        console.log(`✅ Payment ${payment.id} succeeded, updating to completed`);
+
+        const { error: updateError } = await supabase
+          .from("payments")
+          .update({ status: "completed" })
+          .eq("id", payment.id);
+
+        if (updateError) {
+          console.error("❌ Error updating payment:", updateError);
+        } else {
+          console.log(`✅ Payment ${payment.id} status updated to completed`);
+
+          // Создаем подписку асинхронно
+          Promise.resolve().then(async () => {
+            try {
+              await new Promise(resolve => setTimeout(resolve, 1000));
+
+              let baseUrl: string;
+              try {
+                const url = new URL(request.url);
+                baseUrl = `${url.protocol}//${url.host}`;
+
+                if (baseUrl.includes("localhost")) {
+                  const forwardedHost = request.headers.get("x-forwarded-host");
+                  const forwardedProto = request.headers.get("x-forwarded-proto") || "https";
+
+                  if (forwardedHost && !forwardedHost.includes("localhost")) {
+                    baseUrl = `${forwardedProto}://${forwardedHost}`;
+                  } else {
+                    const host = request.headers.get("host");
+                    if (host && !host.includes("localhost")) {
+                      const protocol = request.headers.get("x-forwarded-proto") || "https";
+                      baseUrl = `${protocol}://${host}`;
+                    }
+                  }
+                }
+              } catch {
+                const host = request.headers.get("host") || request.headers.get("x-forwarded-host") || "localhost:3000";
+                const protocol = request.headers.get("x-forwarded-proto") || "https";
+                baseUrl = `${protocol}://${host}`;
+              }
+
+              baseUrl = baseUrl.replace(/\/+$/, "");
+              const completePaymentUrl = `${baseUrl}/api/completePayment`;
+
+              console.log(`🔄 Creating subscription for payment ${payment.id} via ${completePaymentUrl}`);
+
+              const completeRes = await fetch(completePaymentUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  paymentId: payment.id,
+                  userId: payment.user_id,
+                }),
+              });
+
+              if (completeRes.ok) {
+                const data = await completeRes.json();
+                console.log(`✅ Subscription created for payment ${payment.id}:`, {
+                  vlessLink: data.vlessLink ? "generated" : "missing",
+                  expiresAt: data.expiresAt,
+                });
+              } else {
+                const errorText = await completeRes.text();
+                console.error(`❌ Error completing payment ${payment.id}:`, {
+                  status: completeRes.status,
+                  error: errorText,
+                });
+              }
+            } catch (error: any) {
+              console.error(`❌ Error completing payment ${payment.id}:`, error);
+            }
+          });
+        }
+      }
       // Платеж отменен
       if (payment.status !== "canceled") {
         console.log(`❌ Payment ${payment.id} canceled`);

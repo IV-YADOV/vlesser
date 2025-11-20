@@ -97,7 +97,8 @@ export async function createYooKassaPayment(
   // Форматируем сумму с двумя знаками после запятой
   const amountValue = amount.toFixed(2);
 
-  const paymentRequest: YooKassaPaymentRequest = {
+  // Формируем базовый запрос на создание платежа
+  const paymentRequest: any = {
     amount: {
       value: amountValue,
       currency: "RUB",
@@ -107,24 +108,44 @@ export async function createYooKassaPayment(
       type: "redirect",
       return_url: returnUrl,
     },
+    // ВАЖНО: capture: true означает автоматическое подтверждение платежа после оплаты
+    // Если false - платеж будет в статусе waiting_for_capture и потребует ручного подтверждения
+    capture: true, // Автоматическое подтверждение (capture) после оплаты
   };
 
-  if (receipt) {
+  // ВАЖНО: Receipt не передаем, если он не передан явно
+  // Если YooKassa требует receipt (обязательная отправка чеков), его нужно добавить в вызов функции
+  // Для большинства случаев receipt не требуется
+  if (receipt && typeof receipt === 'object' && Array.isArray(receipt.items) && receipt.items.length > 0) {
+    // Добавляем receipt только если он валиден (есть items)
     paymentRequest.receipt = receipt;
+    console.log("📋 Receipt included in payment request with", receipt.items.length, "items");
+  } else {
+    // Явно НЕ добавляем receipt в запрос
+    // Это предотвращает ошибку "Receipt is missing or illegal" если receipt не требуется
+    console.log("📋 Receipt not included in payment request");
+    console.log("📋 Note: If YooKassa requires receipts, you need to pass valid receipt with customer and items");
   }
 
-  if (metadata) {
+  // Добавляем metadata только если она передана
+  if (metadata && typeof metadata === 'object' && Object.keys(metadata).length > 0) {
     paymentRequest.metadata = metadata;
   }
 
+  // Логируем запрос без sensitive данных
   console.log("📋 YooKassa payment request:", {
     amount: amountValue,
     description: description.substring(0, 50) + "...",
     returnUrl: returnUrl.substring(0, 50) + "...",
     shopId: shopId.substring(0, 10) + "...",
-    hasReceipt: !!receipt,
-    hasMetadata: !!metadata,
+    hasReceipt: !!paymentRequest.receipt,
+    hasMetadata: !!paymentRequest.metadata,
+    requestKeys: Object.keys(paymentRequest),
   });
+  
+  // Логируем полный запрос для отладки (без sensitive данных)
+  const debugRequest = JSON.stringify(paymentRequest, null, 2);
+  console.log("📋 Full YooKassa payment request (for debug):", debugRequest.substring(0, 500));
 
   try {
     // Basic Auth: shopId:secretKey в base64
@@ -142,12 +163,27 @@ export async function createYooKassaPayment(
 
     if (!response.ok) {
       const errorText = await response.text();
+      let errorDetails: any;
+      try {
+        errorDetails = JSON.parse(errorText);
+      } catch {
+        errorDetails = errorText;
+      }
+      
       console.error("❌ YooKassa API error:", {
         status: response.status,
         statusText: response.statusText,
         error: errorText,
+        errorDetails: errorDetails,
+        shopId: shopId ? shopId.substring(0, 10) + "..." : "missing",
+        hasSecretKey: !!secretKey,
       });
-      throw new Error(`YooKassa API error: ${response.status} ${errorText}`);
+      
+      const errorMessage = typeof errorDetails === 'object' && errorDetails?.description 
+        ? errorDetails.description 
+        : `YooKassa API error: ${response.status} ${response.statusText}`;
+      
+      throw new Error(errorMessage);
     }
 
     const paymentData: YooKassaPaymentResponse = await response.json();
@@ -192,6 +228,69 @@ export function verifyYooKassaWebhookSignature(
   // В реальной реализации нужно сравнить с подписью из заголовка запроса
   // Для упрощения здесь проверяем только структуру уведомления
   return true; // TODO: Реализовать проверку подписи из заголовка
+}
+
+/**
+ * Подтверждает (capture) платеж в YooKassa
+ * Используется для платежей в статусе waiting_for_capture
+ * Документация: https://yookassa.ru/developers/api#capture_payment
+ */
+export async function captureYooKassaPayment(
+  paymentId: string,
+  shopId: string,
+  secretKey: string,
+  amount?: { value: string; currency: string }
+): Promise<YooKassaPaymentResponse | null> {
+  try {
+    const auth = Buffer.from(`${shopId}:${secretKey}`).toString("base64");
+
+    const requestBody: any = {};
+    if (amount) {
+      requestBody.amount = amount;
+    }
+
+    const response = await fetch(`https://api.yookassa.ru/v3/payments/${paymentId}/capture`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotence-Key": crypto.randomUUID(),
+        "Authorization": `Basic ${auth}`,
+      },
+      body: Object.keys(requestBody).length > 0 ? JSON.stringify(requestBody) : undefined,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      let errorDetails: any;
+      try {
+        errorDetails = JSON.parse(errorText);
+      } catch {
+        errorDetails = errorText;
+      }
+      
+      console.error("❌ YooKassa capture payment error:", {
+        status: response.status,
+        statusText: response.statusText,
+        error: errorText,
+        errorDetails: errorDetails,
+      });
+      
+      return null;
+    }
+
+    const paymentData: YooKassaPaymentResponse = await response.json();
+
+    console.log("✅ YooKassa payment captured:", {
+      id: paymentData.id,
+      status: paymentData.status,
+      amount: paymentData.amount?.value,
+    });
+
+    return paymentData;
+  } catch (error: any) {
+    console.error("❌ Error capturing YooKassa payment:", error);
+    return null;
+  }
 }
 
 /**

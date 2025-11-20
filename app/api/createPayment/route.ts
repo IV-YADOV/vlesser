@@ -10,20 +10,21 @@ async function generatePaymentUrl(
   paymentId: string,
   amount: number,
   plan: ReturnType<typeof getPlanById>,
-  baseUrl: string
-): Promise<{ url: string; yooKassaPaymentId: string } | null> {
+  baseUrl: string,
+  userEmail?: string
+): Promise<{ url: string; yooKassaPaymentId: string; error?: string }> {
   try {
     // Проверка, что plan не undefined
     if (!plan) {
       console.error("❌ Plan is undefined");
-      return null;
+      return { url: "", yooKassaPaymentId: "", error: "Plan is undefined" };
     }
 
     // ВАЖНО: Убеждаемся, что amount - это число (плавающая точка), а не строка
     const amountNumber = Number(amount);
     if (isNaN(amountNumber) || amountNumber <= 0) {
       console.error("❌ Invalid amount:", amount, "type:", typeof amount);
-      return null;
+      return { url: "", yooKassaPaymentId: "", error: `Invalid amount: ${amount}` };
     }
 
     // Получаем настройки ЮKassa
@@ -41,20 +42,20 @@ async function generatePaymentUrl(
     // Детальная проверка параметров
     if (!shopId) {
       console.error("❌ YOOKASSA_SHOP_ID is not set or empty");
-      return null;
+      return { url: "", yooKassaPaymentId: "", error: "YOOKASSA_SHOP_ID not configured" };
     }
 
     if (!secretKey) {
       console.error("❌ YOOKASSA_SECRET_KEY is not set or empty");
-      return null;
+      return { url: "", yooKassaPaymentId: "", error: "YOOKASSA_SECRET_KEY not configured" };
     }
 
     // Проверяем, что plan не undefined (должно быть проверено выше, но TypeScript требует явной проверки)
     if (!plan) {
       console.error("❌ Plan is undefined when creating description");
-      return null;
+      return { url: "", yooKassaPaymentId: "", error: "Plan is undefined when creating description" };
     }
-
+    
     // Формируем описание платежа (макс 128 символов для ЮKassa)
     let description = `VLESS VPN подписка: ${plan.name} (${plan.duration} дней)`;
     
@@ -63,14 +64,50 @@ async function generatePaymentUrl(
       description = description.substring(0, 125) + "...";
     }
 
-    // URL для редиректа после оплаты
+    // URL для редиректа после оплаты (YooKassa вернет пользователя на этот URL)
     const returnUrl = `${baseUrl}/api/payment/success?payment_id=${paymentId}`;
+
+    // Формируем receipt для YooKassa (54-ФЗ)
+    // Receipt обязателен, если в настройках YooKassa включена обязательная отправка чеков
+    let receipt: any = undefined;
+    
+    // Если есть email пользователя, формируем receipt
+    // Если email нет, но YooKassa требует receipt - используем placeholder email
+    if (userEmail || process.env.YOOKASSA_REQUIRE_RECEIPT === 'true') {
+      const customerEmail = userEmail || `user_${paymentId}@vlesser.ru`; // Placeholder email если нет реального
+      
+      receipt = {
+        customer: {
+          email: customerEmail,
+        },
+        items: [
+          {
+            description: description.substring(0, 128), // Описание товара/услуги
+            quantity: "1.00", // Количество
+            amount: {
+              value: amountNumber.toFixed(2), // Сумма за единицу
+              currency: "RUB",
+            },
+            vat_code: 1, // НДС 20% (код 1) - для услуг в РФ обычно 20%
+            // Если без НДС, используйте vat_code: 0
+          },
+        ],
+      };
+      
+      console.log("📋 Receipt generated for YooKassa:", {
+        customerEmail: customerEmail,
+        itemsCount: receipt.items.length,
+        totalAmount: amountNumber.toFixed(2),
+      });
+    }
 
     console.log("💰 YooKassa payment initialization:", {
       amount: amountNumber.toFixed(2),
       description: description.substring(0, 50) + "...",
-      returnUrl: returnUrl.substring(0, 50) + "...",
+      baseUrl: baseUrl,
+      returnUrl: returnUrl,
       plan: plan.name,
+      hasReceipt: !!receipt,
     });
 
     // Создаем платеж через ЮKassa API
@@ -81,6 +118,7 @@ async function generatePaymentUrl(
       returnUrl,
       shopId,
       secretKey,
+      receipt: receipt, // Передаем receipt, если он сформирован
       metadata: {
         payment_id: paymentId, // Сохраняем наш внутренний ID платежа
         plan_id: plan.id,
@@ -90,7 +128,7 @@ async function generatePaymentUrl(
 
     if (!yooKassaPayment) {
       console.error("❌ YooKassa payment creation returned null or undefined");
-      return null;
+      return { url: "", yooKassaPaymentId: "", error: "YooKassa API returned null" };
     }
 
     if (!yooKassaPayment.confirmation?.confirmation_url) {
@@ -99,7 +137,11 @@ async function generatePaymentUrl(
         status: yooKassaPayment.status,
         confirmation: yooKassaPayment.confirmation,
       });
-      return null;
+      return { 
+        url: "", 
+        yooKassaPaymentId: yooKassaPayment.id || "", 
+        error: "YooKassa payment created but no confirmation URL" 
+      };
     }
 
     const confirmationUrl = yooKassaPayment.confirmation.confirmation_url;
@@ -121,13 +163,23 @@ async function generatePaymentUrl(
     };
   } catch (error: any) {
     console.error("❌ Error creating YooKassa payment:", error);
-    return null;
+    console.error("❌ Error details:", {
+      message: error?.message,
+      stack: error?.stack,
+      cause: error?.cause,
+      name: error?.name,
+    });
+    return { 
+      url: "", 
+      yooKassaPaymentId: "", 
+      error: error?.message || "Unknown error creating YooKassa payment" 
+    };
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const { planId, userId, promocode } = await request.json();
+    const { planId, userId, promocode, userEmail } = await request.json();
 
     if (!planId || !userId) {
       return NextResponse.json(
@@ -185,13 +237,46 @@ export async function POST(request: NextRequest) {
     let finalAmount: number = Number(plan.price); // Убеждаемся, что это число
     let appliedPromocode = null;
 
-    // Готовим базовый URL для внутренних запросов
-    const host = request.headers.get("host") || "localhost:3000";
-    let protocol = request.headers.get("x-forwarded-proto") || "http";
-    if (host.includes("localhost") || host.includes("127.0.0.1")) {
-      protocol = "http";
+    // Готовим базовый URL для YooKassa
+    // ВАЖНО: В production ВСЕГДА используем SITE_URL из переменных окружения
+    const siteUrl = process.env.SITE_URL || process.env.NEXT_PUBLIC_SITE_URL;
+    let baseUrl: string;
+    
+    if (siteUrl) {
+      // Убираем завершающий слэш и пробелы
+      baseUrl = siteUrl.trim().replace(/\/+$/, "");
+      console.log("🌐 Using SITE_URL from env for baseUrl:", baseUrl);
+      console.log("🌐 Environment check:", {
+        SITE_URL: process.env.SITE_URL ? "✅ Set" : "❌ Not set",
+        NEXT_PUBLIC_SITE_URL: process.env.NEXT_PUBLIC_SITE_URL ? "✅ Set" : "❌ Not set",
+        finalBaseUrl: baseUrl,
+      });
+    } else {
+      // Fallback: формируем из заголовков запроса (только для dev/тестов)
+      const host = request.headers.get("host") || 
+                   request.headers.get("x-forwarded-host") || 
+                   "localhost:3000";
+      let protocol = request.headers.get("x-forwarded-proto") || "https";
+      
+      // Для localhost/ngrok используем http
+      if (host.includes("localhost") || host.includes("127.0.0.1") || host.includes("ngrok")) {
+        protocol = "http";
+      } else {
+        // В production всегда используем https
+        protocol = "https";
+      }
+      
+      baseUrl = `${protocol}://${host}`;
+      console.error("❌ SITE_URL not set in env! Using headers as fallback:", baseUrl);
+      console.error("❌ Request headers:", {
+        host: request.headers.get("host"),
+        forwardedHost: request.headers.get("x-forwarded-host"),
+        forwardedProto: request.headers.get("x-forwarded-proto"),
+      });
+      console.error("❌ ВАЖНО: В production необходимо установить SITE_URL в переменных окружения!");
     }
-    const baseUrl = `${protocol}://${host}`;
+    
+    console.log("🔗 Final baseUrl for YooKassa:", baseUrl);
 
     if (promocode) {
       const validateRes = await fetch(`${baseUrl}/api/promocodes/validate`, {
@@ -271,10 +356,33 @@ export async function POST(request: NextRequest) {
         }
 
         // Создаем платеж через ЮKassa
-        const paymentResult = await generatePaymentUrl(paymentFallback.id, finalAmount, plan, baseUrl);
+        const paymentResult = await generatePaymentUrl(paymentFallback.id, finalAmount, plan, baseUrl, userEmail);
         if (!paymentResult || !paymentResult.url) {
+          // Детальное логирование ошибки
+          const errorDetails = {
+            paymentId: paymentFallback.id,
+            amount: finalAmount,
+            planId: planId,
+            hasShopId: !!process.env.YOOKASSA_SHOP_ID,
+            hasSecretKey: !!process.env.YOOKASSA_SECRET_KEY,
+            baseUrl: baseUrl,
+            error: paymentResult?.error || "Unknown error",
+          };
+          console.error("❌ Failed to generate payment URL (fallback). Details:", errorDetails);
+          
+          // Возвращаем детальную ошибку
+          const errorMessage = paymentResult?.error || "Failed to generate payment URL";
+          
+          // Проверяем переменные окружения
+          if (!process.env.YOOKASSA_SHOP_ID) {
+            console.error("❌ YOOKASSA_SHOP_ID is missing in environment variables");
+          }
+          if (!process.env.YOOKASSA_SECRET_KEY) {
+            console.error("❌ YOOKASSA_SECRET_KEY is missing in environment variables");
+          }
+          
           return NextResponse.json(
-            { error: "Failed to generate payment URL" },
+            { error: errorMessage },
             { status: 500 }
           );
         }
@@ -309,10 +417,33 @@ export async function POST(request: NextRequest) {
     }
 
     // Создаем платеж через ЮKassa
-    const paymentResult = await generatePaymentUrl(payment.id, finalAmount, plan, baseUrl);
+    const paymentResult = await generatePaymentUrl(payment.id, finalAmount, plan, baseUrl, userEmail);
     if (!paymentResult || !paymentResult.url) {
+      // Детальное логирование ошибки
+      const errorDetails = {
+        paymentId: payment.id,
+        amount: finalAmount,
+        planId: planId,
+        hasShopId: !!process.env.YOOKASSA_SHOP_ID,
+        hasSecretKey: !!process.env.YOOKASSA_SECRET_KEY,
+        baseUrl: baseUrl,
+        error: paymentResult?.error || "Unknown error",
+      };
+      console.error("❌ Failed to generate payment URL. Details:", errorDetails);
+      
+      // Возвращаем детальную ошибку
+      const errorMessage = paymentResult?.error || "Failed to generate payment URL";
+      
+      // Проверяем переменные окружения
+      if (!process.env.YOOKASSA_SHOP_ID) {
+        console.error("❌ YOOKASSA_SHOP_ID is missing in environment variables");
+      }
+      if (!process.env.YOOKASSA_SECRET_KEY) {
+        console.error("❌ YOOKASSA_SECRET_KEY is missing in environment variables");
+      }
+      
       return NextResponse.json(
-        { error: "Failed to generate payment URL" },
+        { error: errorMessage },
         { status: 500 }
       );
     }
@@ -341,9 +472,20 @@ export async function POST(request: NextRequest) {
       paymentUrl: paymentResult.url,
     });
   } catch (error: any) {
-    console.error("Create payment error:", error);
+    console.error("❌ Create payment error:", error);
+    console.error("❌ Error details:", {
+      message: error?.message,
+      stack: error?.stack,
+      name: error?.name,
+    });
+    
+    // Возвращаем более детальную ошибку для отладки
+    const errorMessage = error?.message || "Unknown error";
     return NextResponse.json(
-      { error: "Internal server error: " + (error.message || "Unknown error") },
+      { 
+        error: "Internal server error: " + errorMessage,
+        // В production не показываем детали, но логируем их
+      },
       { status: 500 }
     );
   }

@@ -7,19 +7,28 @@ SET session_replication_role = 'replica';
 
 -- Удаляем данные в правильном порядке (сначала дочерние таблицы, потом родительские)
 
--- 1. Очищаем платежи (ссылается на users)
+-- 1. Очищаем сообщения поддержки (ссылается на support_tickets)
+TRUNCATE TABLE support_messages CASCADE;
+
+-- 2. Очищаем тикеты поддержки (ссылается на users)
+TRUNCATE TABLE support_tickets CASCADE;
+
+-- 3. Очищаем роли сотрудников поддержки (независимая таблица)
+TRUNCATE TABLE support_staff_roles CASCADE;
+
+-- 4. Очищаем платежи (ссылается на users)
 TRUNCATE TABLE payments CASCADE;
 
--- 2. Очищаем подписки (ссылается на users)
+-- 5. Очищаем подписки (ссылается на users)
 TRUNCATE TABLE subscriptions CASCADE;
 
--- 3. Очищаем токены авторизации (независимая таблица)
+-- 6. Очищаем токены авторизации (независимая таблица)
 TRUNCATE TABLE auth_tokens CASCADE;
 
--- 4. Очищаем промокоды (независимая таблица)
+-- 7. Очищаем промокоды (независимая таблица)
 TRUNCATE TABLE promocodes CASCADE;
 
--- 5. Очищаем пользователей (родительская таблица)
+-- 8. Очищаем пользователей (родительская таблица)
 TRUNCATE TABLE users CASCADE;
 
 -- Включаем обратно проверку внешних ключей
@@ -39,5 +48,14 @@ SELECT
   'auth_tokens', COUNT(*) FROM auth_tokens
 UNION ALL
 SELECT 
-  'promocodes', COUNT(*) FROM promocodes;
+  'promocodes', COUNT(*) FROM promocodes
+UNION ALL
+SELECT 
+  'support_tickets', COUNT(*) FROM support_tickets
+UNION ALL
+SELECT 
+  'support_messages', COUNT(*) FROM support_messages
+UNION ALL
+SELECT 
+  'support_staff_roles', COUNT(*) FROM support_staff_roles;
 
