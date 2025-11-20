@@ -1,14 +1,55 @@
 "use client";
-import { Suspense } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { X } from "lucide-react";
+import { X, AlertCircle } from "lucide-react";
 import Link from "next/link";
 
 function FailContent() {
   const searchParams = useSearchParams();
+  const paymentId = searchParams.get("payment_id");
   const error = searchParams.get("error") || "Платеж не был завершен";
+  const [statusUpdated, setStatusUpdated] = useState(false);
+
+  // Обновляем статус платежа при загрузке страницы, если он еще pending
+  useEffect(() => {
+    const updatePaymentStatus = async () => {
+      if (paymentId && !statusUpdated) {
+        try {
+          // Проверяем статус платежа через API
+          const res = await fetch(`/api/payments?paymentId=${paymentId}`);
+          
+          if (res.ok) {
+            const data = await res.json();
+            const paymentStatus = data.payment?.status || data.status;
+            
+            // Если платеж все еще pending - обновляем на failed
+            if (paymentStatus === "pending") {
+              console.log(`🔄 Updating payment ${paymentId} status from pending to failed`);
+              
+              // Пытаемся обновить статус через API (опционально)
+              // В основном статус обновляется через fail route, но для надежности делаем проверку
+              const updateRes = await fetch("/api/payment/fail", {
+                method: "GET",
+              });
+              
+              if (updateRes.ok) {
+                console.log(`✅ Payment status updated to failed`);
+              }
+            }
+          }
+        } catch (error) {
+          console.error("❌ Error updating payment status:", error);
+          // Продолжаем, даже если не удалось обновить
+        } finally {
+          setStatusUpdated(true);
+        }
+      }
+    };
+    
+    updatePaymentStatus();
+  }, [paymentId, statusUpdated]);
 
   return (
     <div className="pt-32 pb-20 px-4 sm:px-6 lg:px-8">
@@ -18,30 +59,62 @@ function FailContent() {
             <X className="w-10 h-10 text-red-500" />
           </div>
           <h1 className="text-4xl font-bold mb-4">
-            Оплата <span className="text-red-500">не удалась</span>
+            Оплата <span className="text-red-500">не завершена</span>
           </h1>
-          <p className="text-xl text-gray-400">
+          <p className="text-xl text-gray-400 mb-4">
             {error}
           </p>
         </div>
 
         <Card className="mb-6">
           <CardHeader>
-            <CardTitle>Что делать дальше?</CardTitle>
+            <CardTitle>Платеж не был завершен</CardTitle>
           </CardHeader>
           <CardContent>
-            <ul className="space-y-3 text-gray-300">
-              <li>• Проверьте данные платежной карты</li>
-              <li>• Убедитесь, что на карте достаточно средств</li>
-              <li>• Попробуйте другой способ оплаты</li>
-              <li>• Если проблема сохраняется, обратитесь в поддержку</li>
-            </ul>
+            <div className="space-y-4">
+              <div className="flex items-start gap-3 p-4 bg-blue-500/10 rounded-lg border border-blue-500/20">
+                <AlertCircle className="w-5 h-5 text-blue-500 mt-0.5 flex-shrink-0" />
+                <div className="text-sm text-gray-300">
+                  <p className="font-medium mb-2 text-blue-400">Если вы уже оплатили:</p>
+                  <p className="text-gray-300 mb-2">
+                    Если вы завершили оплату на странице ЮKassa, но видите это сообщение, 
+                    пожалуйста, обратитесь в поддержку через Telegram-бота.
+                  </p>
+                  {paymentId && (
+                    <p className="text-gray-400 text-xs mt-2">
+                      При обращении укажите ID платежа: <code className="bg-gray-800 px-2 py-1 rounded">{paymentId}</code>
+                    </p>
+                  )}
+                </div>
+              </div>
+              
+              <div className="mt-4 pt-4 border-t border-gray-800">
+                <p className="text-sm text-gray-400 mb-3">Если оплата не была завершена:</p>
+                <ul className="space-y-2 text-gray-300 text-sm">
+                  <li>• Оплата была отменена</li>
+                  <li>• Оплата не была завершена</li>
+                  <li>• Вы можете попробовать оплатить снова</li>
+                </ul>
+              </div>
+            </div>
           </CardContent>
         </Card>
 
         <div className="text-center space-y-4">
+          <a 
+            href="https://t.me/support" 
+            target="_blank" 
+            rel="noopener noreferrer"
+            className="inline-block w-full"
+          >
+            <Button className="w-full bg-blue-600 hover:bg-blue-700">
+              Обратиться в поддержку
+            </Button>
+          </a>
           <Link href="/checkout">
-            <Button className="w-full">Попробовать снова</Button>
+            <Button variant="outline" className="w-full">
+              Попробовать снова
+            </Button>
           </Link>
           <Link href="/">
             <Button variant="ghost" className="w-full">
@@ -67,6 +140,7 @@ export default function FailPage() {
     </Suspense>
   );
 }
+
 
 
 

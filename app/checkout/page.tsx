@@ -115,7 +115,7 @@ function CheckoutContent() {
     try {
       const userId = getUserIdFromTelegram(user);
       
-      // Создаем платеж и получаем URL для редиректа на Robokassa
+      // Создаем платеж и получаем URL для редиректа на ЮKassa
       const paymentRes = await fetch("/api/createPayment", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -150,7 +150,7 @@ function CheckoutContent() {
       // Сохраняем paymentId для дальнейшего использования
       setPaymentId(paymentData.paymentId);
 
-      // Редирект на страницу оплаты Robokassa
+      // Редирект на страницу оплаты ЮKassa
       window.location.href = paymentData.paymentUrl;
     } catch (error: any) {
       console.error("Payment error:", error);

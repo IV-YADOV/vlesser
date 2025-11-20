@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { verifyRobokassaSignature } from "@/lib/robokassa";
+import { createClient } from "@/lib/supabase/server";
 
 /**
- * Success URL - редирект после успешной оплаты от Robokassa
+ * Success URL - редирект после оплаты от ЮKassa
  * Обрабатывает GET запрос от платежной системы
- * Документация: https://docs.robokassa.ru/pay-interface/
+ * ВАЖНО: YooKassa возвращает на этот URL в любом случае (и при успехе, и при отмене)
+ * Поэтому нужно проверять статус платежа и перенаправлять на fail, если платеж не прошел
+ * Документация: https://yookassa.ru/developers/payment-acceptance/getting-started/payment-process
  */
 export async function GET(request: NextRequest) {
   try {
@@ -13,24 +15,71 @@ export async function GET(request: NextRequest) {
     console.log("✅ Success URL called");
     console.log("📋 Params:", Object.fromEntries(searchParams.entries()));
     
-    // Параметры от Robokassa
-    const outSum = searchParams.get("OutSum");
-    const invId = searchParams.get("InvId");
-    const signature = searchParams.get("SignatureValue");
-    const password_1 = process.env.ROBOKASSA_PASSWORD_1?.trim() || "";
-
-    // Проверяем подпись для SuccessURL: MD5(OutSum:InvId:Password_1)
-    if (password_1 && outSum && invId && signature) {
+    // Параметры от ЮKassa (payment_id - это наш внутренний ID платежа)
+    const paymentId = searchParams.get("payment_id");
+    
+    // Проверяем статус платежа, если он передан
+    if (paymentId) {
       try {
-        const isValid = verifyRobokassaSignature(outSum, invId, signature, password_1);
-        console.log("🔐 Signature verification:", { isValid, outSum, invId });
+        const supabase = await createClient();
         
-        if (!isValid) {
-          console.error("❌ Invalid Robokassa signature in SuccessURL");
-          // Все равно редиректим на страницу успеха (подпись проверяется в Result URL)
+        const { data: payment, error: paymentError } = await supabase
+          .from("payments")
+          .select("*")
+          .eq("id", paymentId)
+          .single();
+        
+        if (!paymentError && payment) {
+          console.log(`📋 Payment status: ${payment.status}`);
+          
+          // Если платеж failed или canceled - перенаправляем на fail страницу
+          if (payment.status === "failed" || payment.status === "canceled") {
+            console.log(`❌ Payment ${paymentId} is ${payment.status}, redirecting to fail page`);
+            
+            const host = request.headers.get("host") || 
+                         request.headers.get("x-forwarded-host") || 
+                         "vlesser.ru";
+            const protocol = request.headers.get("x-forwarded-proto") || 
+                             (request.url.startsWith("https") ? "https" : "http");
+            
+            const queryParams = new URLSearchParams();
+            queryParams.set("payment_id", paymentId);
+            queryParams.set("error", "Платеж не был завершен");
+            
+            const redirectPath = `/checkout/fail?${queryParams.toString()}`;
+            const redirectUrl = `${protocol}://${host}${redirectPath}`;
+            
+            console.log("🔄 Redirecting to fail page:", redirectUrl);
+            return NextResponse.redirect(redirectUrl, 302);
+          }
+          
+          // Если платеж pending - пользователь вернулся, но не завершил оплату
+          // Перенаправляем на fail страницу с сообщением
+          if (payment.status === "pending") {
+            console.log(`⚠️ Payment ${paymentId} is still pending, redirecting to fail page`);
+            
+            const host = request.headers.get("host") || 
+                         request.headers.get("x-forwarded-host") || 
+                         "vlesser.ru";
+            const protocol = request.headers.get("x-forwarded-proto") || 
+                             (request.url.startsWith("https") ? "https" : "http");
+            
+            const queryParams = new URLSearchParams();
+            queryParams.set("payment_id", paymentId);
+            queryParams.set("error", "Платеж не был завершен");
+            
+            const redirectPath = `/checkout/fail?${queryParams.toString()}`;
+            const redirectUrl = `${protocol}://${host}${redirectPath}`;
+            
+            console.log("🔄 Redirecting to fail page (pending payment):", redirectUrl);
+            return NextResponse.redirect(redirectUrl, 302);
+          }
+          
+          // Если платеж completed - продолжаем на success страницу
         }
-      } catch (sigError) {
-        console.error("❌ Signature verification error:", sigError);
+      } catch (error: any) {
+        console.error("❌ Error checking payment status:", error);
+        // Продолжаем обработку, даже если не удалось проверить статус
       }
     }
 
@@ -43,11 +92,8 @@ export async function GET(request: NextRequest) {
     
     // Строим абсолютный URL для редиректа
     const queryParams = new URLSearchParams();
-    if (invId) {
-      queryParams.set("payment_id", invId);
-    }
-    if (outSum) {
-      queryParams.set("amount", outSum);
+    if (paymentId) {
+      queryParams.set("payment_id", paymentId);
     }
     
     const queryString = queryParams.toString();

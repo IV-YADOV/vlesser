@@ -66,14 +66,14 @@ export async function POST(request: NextRequest) {
         });
     }
 
-    // ВАЖНО: В production режиме completePayment вызывается только после подтверждения оплаты через callback
-    // Статус "completed" устанавливается ТОЛЬКО через callback от Robokassa (ResultURL)
-    // НЕ обновляем статус автоматически - это должен делать только callback
+    // ВАЖНО: В production режиме completePayment вызывается только после подтверждения оплаты через webhook
+    // Статус "completed" устанавливается ТОЛЬКО через webhook от ЮKassa
+    // НЕ обновляем статус автоматически - это должен делать только webhook
 
     // Проверяем статус платежа - в production только completed платежи могут быть обработаны
     if (payment.status !== "completed") {
       console.error("❌ Attempted to complete payment with status:", payment.status);
-      console.error("Payment must be marked as 'completed' by Robokassa callback (ResultURL) first");
+      console.error("Payment must be marked as 'completed' by YooKassa webhook first");
       console.error("Payment details:", {
         id: payment.id,
         status: payment.status,
@@ -82,7 +82,7 @@ export async function POST(request: NextRequest) {
       });
       return NextResponse.json(
         {
-          error: "Payment is not completed. Status: " + payment.status + ". Payment must be confirmed by Robokassa callback first.",
+          error: "Payment is not completed. Status: " + payment.status + ". Payment must be confirmed by YooKassa webhook first.",
         },
         { status: 400 }
       );

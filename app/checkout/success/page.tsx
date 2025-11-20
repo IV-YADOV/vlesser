@@ -8,57 +8,85 @@ import Link from "next/link";
 
 function SuccessContent() {
   const searchParams = useSearchParams();
-  const paymentIdParam = searchParams.get("payment_id"); // Это InvId от Robokassa
+  const paymentIdParam = searchParams.get("payment_id"); // Это наш внутренний ID платежа
   const amountParam = searchParams.get("amount");
   const [vlessLink, setVlessLink] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const paymentIdRef = useRef<string | null>(null);
 
   useEffect(() => {
+    // Инициализируем paymentId из параметра URL
+    if (paymentIdParam && !paymentIdRef.current) {
+      paymentIdRef.current = paymentIdParam;
+      console.log(`✅ Initialized paymentId from URL: ${paymentIdParam}`);
+    }
+
     let intervalId: NodeJS.Timeout | null = null;
     let checkCount = 0;
-    // В production увеличиваем время ожидания до 5 минут (150 проверок по 2 секунды)
-    // Callback от Robokassa может приходить с задержкой
-    const maxChecks = 150; // 150 проверок по 2 секунды = 5 минут максимум
+    // В production время ожидания:
+    // - 60 проверок для pending платежей (2 минуты) - если пользователь не оплатил
+    // - 150 проверок для processing платежей (5 минут) - если платеж обрабатывается
+    const maxChecksPending = 60; // 60 проверок по 2 секунды = 2 минуты для pending
+    const maxChecksProcessing = 150; // 150 проверок по 2 секунды = 5 минут для processing
+    let maxChecks = maxChecksPending;
     let isStopped = false;
+    let pendingStartTime = Date.now(); // Время начала ожидания pending платежа
 
-    const checkPaymentStatus = async () => {
+    const checkPaymentStatus = async (forceYooKassaCheck: boolean = false) => {
+      // Останавливаемся если достигли лимита проверок или остановка запрошена
       if (isStopped || checkCount >= maxChecks) {
         if (intervalId) {
           clearInterval(intervalId);
         }
-        if (checkCount >= maxChecks) {
-          console.warn("⚠️ Max checks reached, stopping polling");
+        if (checkCount >= maxChecks && !isStopped) {
+          const timePassed = (Date.now() - pendingStartTime) / 1000 / 60;
+          console.warn(`⚠️ Max checks reached (${checkCount}), stopping polling after ${timePassed.toFixed(1)} minutes`);
+          
+          // Если прошло много времени и платеж все еще pending, значит пользователь не оплатил
           setLoading(false);
         }
         return;
       }
 
       checkCount++;
-      console.log(`🔍 Checking payment status (attempt ${checkCount}/${maxChecks})`);
+      
+      // Определяем, нужно ли проверять через YooKassa API:
+      // 1. При первой проверке
+      // 2. Принудительно, если указано forceYooKassaCheck
+      // 3. Каждые 5 проверок (каждые 10 секунд)
+      // 4. Если платеж в pending более 30 секунд
+      const shouldCheckYooKassa = forceYooKassaCheck || 
+        checkCount === 1 || 
+        checkCount % 5 === 0;
+      
+      console.log(`🔍 Checking payment status (attempt ${checkCount}/${maxChecks}, useYooKassaCheck: ${shouldCheckYooKassa})`);
 
       try {
         let res: Response;
-        const currentPaymentId = paymentIdRef.current;
+        const currentPaymentId = paymentIdRef.current || paymentIdParam;
         
-        // Если есть paymentId (UUID), ищем по нему
-        if (currentPaymentId) {
-          console.log(`🔍 Searching by paymentId: ${currentPaymentId}`);
-          res = await fetch(`/api/payments?paymentId=${currentPaymentId}`);
-        } 
-        // Если есть amount, ищем по сумме
-        else if (amountParam) {
-          console.log(`🔍 Searching by amount: ${amountParam}`);
-          res = await fetch(`/api/payments?amount=${amountParam}`);
-        } 
-        else {
-          console.warn("⚠️ No paymentId or amount provided, stopping");
+        if (!currentPaymentId) {
+          console.warn("⚠️ No paymentId available, stopping");
           setLoading(false);
           isStopped = true;
           if (intervalId) {
             clearInterval(intervalId);
           }
           return;
+        }
+
+        // Проверяем через ЮKassa API, если нужно
+        if (shouldCheckYooKassa) {
+          console.log(`🔄 Checking payment status via YooKassa API: ${currentPaymentId}`);
+          res = await fetch("/api/payment/checkStatus", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ paymentId: currentPaymentId }),
+          });
+        } else {
+          // Обычная проверка через наш API
+          console.log(`🔍 Searching by paymentId: ${currentPaymentId}`);
+          res = await fetch(`/api/payments?paymentId=${currentPaymentId}`);
         }
 
         if (!res) {
@@ -71,37 +99,101 @@ function SuccessContent() {
           
           console.log("📋 Payment data:", {
             paymentId: data.payment?.id,
-            status: data.payment?.status,
+            status: data.payment?.status || data.status,
             hasSubscription: !!data.subscription,
             hasVlessLink: !!data.subscription?.vless_link,
+            yooKassaStatus: data.yooKassaStatus,
+            message: data.message,
           });
           
           // Сохраняем paymentId для следующих проверок
-          if (data.payment?.id && !paymentIdRef.current) {
-            paymentIdRef.current = data.payment.id;
-            console.log(`✅ Saved paymentId: ${data.payment.id}`);
+          const paymentId = data.payment?.id || currentPaymentId;
+          if (paymentId && !paymentIdRef.current) {
+            paymentIdRef.current = paymentId;
+            console.log(`✅ Saved paymentId: ${paymentId}`);
           }
 
-          // Если платеж найден, но еще pending - продолжаем ждать callback от Robokassa
-          // В production режиме мы полагаемся только на callback (ResultURL) от Robokassa
-          if (data.payment?.status === "pending") {
-            const createdAt = new Date(data.payment.created_at);
-            const now = new Date();
-            const minutesPassed = (now.getTime() - createdAt.getTime()) / (1000 * 60);
+          // Определяем статус платежа
+          // ВАЖНО: Приоритет отдается статусу от YooKassa API, если он есть
+          const yooKassaStatus = data.yooKassaStatus;
+          const paymentStatus = data.status || data.payment?.status;
+          const payment = data.payment || data;
+
+          // Если есть статус от YooKassa, используем его для принятия решений
+          // Статус "succeeded" или "waiting_for_capture" от YooKassa означает успешную оплату
+          const isYooKassaSucceeded = yooKassaStatus === "succeeded" || yooKassaStatus === "waiting_for_capture";
+          const isLocalCompleted = paymentStatus === "completed";
+
+          console.log("🔍 Payment status analysis:", {
+            yooKassaStatus,
+            localStatus: paymentStatus,
+            isYooKassaSucceeded,
+            isLocalCompleted,
+            message: data.message,
+          });
+
+          // Если YooKassa говорит, что платеж succeeded/waiting_for_capture, но локальный статус pending
+          // Это означает, что платеж оплачен, но статус еще не обновился в БД
+          // В этом случае принудительно вызываем checkStatus, чтобы обновить статус и создать подписку
+          if (isYooKassaSucceeded && !isLocalCompleted) {
+            console.log(`✅ YooKassa reports payment succeeded (${yooKassaStatus}), but local status is ${paymentStatus}`);
+            console.log(`🔄 Forcing status check to update payment and create subscription...`);
             
-            console.log(`⏳ Payment still pending, waiting for Robokassa callback... (${minutesPassed.toFixed(1)} minutes passed)`);
+            // Увеличиваем лимит проверок для processing платежей
+            maxChecks = maxChecksProcessing;
             
-            // В production: если платеж pending очень долго (более 5 минут), показываем сообщение
-            if (minutesPassed >= 5) {
-              console.warn(`⚠️ Payment pending for ${minutesPassed.toFixed(1)} minutes - callback may be delayed or failed`);
-              // Не останавливаемся, продолжаем ждать callback - возможно он все еще придет
+            // Если это не была проверка через YooKassa API, делаем ее
+            if (!shouldCheckYooKassa) {
+              return checkPaymentStatus(true);
             }
             
+            // Если уже проверяли через YooKassa, но статус не обновился - продолжаем ждать
+            // Это может занять несколько секунд (webhook обрабатывается асинхронно)
+            const createdAt = new Date(payment?.created_at || new Date());
+            const now = new Date();
+            const secondsPassed = (now.getTime() - createdAt.getTime()) / 1000;
+            
+            // Даем до 5 минут для обработки webhook и обновления статуса
+            if (secondsPassed < 300) {
+              console.log(`⏳ Waiting for payment status to update in DB (${secondsPassed.toFixed(0)}s passed)...`);
+              console.log(`📝 Webhook may be processing, will wait up to 5 minutes`);
+              return;
+            } else {
+              console.warn(`⚠️ Payment succeeded in YooKassa but status not updated in DB after ${(secondsPassed/60).toFixed(1)} minutes`);
+              // Если прошло много времени - возможно webhook не дошел, но платеж успешен
+              // Продолжаем ждать, но показываем предупреждение
+            }
+          }
+
+          // Если платеж найден, но еще pending - перенаправляем на fail страницу
+          // Пользователь не завершил оплату, не нужно ждать
+          if (paymentStatus === "pending" && !isYooKassaSucceeded) {
+            console.log(`⏳ Payment is pending, redirecting to fail page`);
+            
+            // Останавливаем polling
+            setLoading(false);
+            isStopped = true;
+            if (intervalId) {
+              clearInterval(intervalId);
+            }
+            
+            // Перенаправляем на fail страницу
+            const currentPaymentId = payment?.id || paymentIdRef.current || paymentIdParam;
+            if (currentPaymentId) {
+              window.location.href = `/checkout/fail?payment_id=${currentPaymentId}&error=Платеж не был завершен`;
+            } else {
+              window.location.href = `/checkout/fail?error=Платеж не был завершен`;
+            }
             return;
+          }
+          
+          // Если платеж обрабатывается (succeeded в YooKassa, но еще не completed локально) - даем больше времени
+          if (isYooKassaSucceeded && !isLocalCompleted) {
+            maxChecks = maxChecksProcessing;
           }
 
           // Если платеж failed - останавливаемся
-          if (data.payment?.status === "failed") {
+          if (paymentStatus === "failed") {
             console.error("❌ Payment failed, stopping");
             setLoading(false);
             isStopped = true;
@@ -111,10 +203,9 @@ function SuccessContent() {
             return;
           }
 
-          if (data.payment?.status === "completed") {
+          // Если платеж completed - проверяем подписку
+          if (paymentStatus === "completed") {
             // Если подписка уже есть, показываем VLESS
-            // ВАЖНО: Подписка создается автоматически через callback от Robokassa (ResultURL)
-            // Мы просто ждем, пока она появится в БД после обработки callback
             if (data.subscription?.vless_link) {
               console.log("✅ Subscription found with VLESS link");
               setVlessLink(data.subscription.vless_link);
@@ -126,23 +217,23 @@ function SuccessContent() {
               return;
             }
 
-            // Платеж completed, но подписки еще нет - ждем callback от Robokassa
-            // Callback автоматически создаст подписку и xray клиента
-            const createdAt = new Date(data.payment.created_at);
+            // Платеж completed, но подписки еще нет
+            // Если это первая проверка через ЮKassa API, подписка может создаваться
+            // Продолжаем проверки, чтобы дождаться подписки
+            const createdAt = new Date(payment?.created_at || new Date());
             const now = new Date();
             const secondsPassed = (now.getTime() - createdAt.getTime()) / 1000;
             
-            console.log(`⏳ Payment completed, waiting for Robokassa callback to create subscription... (${secondsPassed.toFixed(0)}s passed)`);
+            console.log(`⏳ Payment completed, waiting for subscription... (${secondsPassed.toFixed(0)}s passed)`);
             
-            // В production: если платеж completed очень долго (более 2 минут), но подписки нет,
-            // возможно callback не пришел - продолжаем ждать, но предупреждаем
-            if (secondsPassed >= 120) {
-              console.warn(`⚠️ Payment completed ${secondsPassed.toFixed(0)}s ago, but subscription not created yet. Callback may be delayed.`);
-              // Продолжаем ждать - callback может прийти позже
+            // Если прошло более 30 секунд и подписки все еще нет, продолжаем polling
+            // (подписка создается через completePayment при проверке через ЮKassa API)
+            if (secondsPassed >= 30 && checkCount > 3) {
+              console.warn(`⚠️ Payment completed ${secondsPassed.toFixed(0)}s ago, but subscription not created yet.`);
             }
             
-            // Не вызываем completePayment - это делает только callback от Robokassa
-            // Просто продолжаем polling и ждем, пока подписка появится в БД
+            // Продолжаем polling, чтобы дождаться подписки
+            return;
           }
         } else {
           // Если 404 - платеж еще не найден, продолжаем проверки
@@ -187,8 +278,8 @@ function SuccessContent() {
       }
     };
 
-    // Первая проверка сразу
-    checkPaymentStatus();
+    // Первая проверка сразу через ЮKassa API для быстрой проверки статуса
+    checkPaymentStatus(true);
 
     // Затем проверяем каждые 2 секунды
     intervalId = setInterval(() => {
@@ -219,7 +310,7 @@ function SuccessContent() {
             <Loader2 className="w-12 h-12 animate-spin text-blue-500 mx-auto mb-4" />
             <p className="text-gray-400 mb-2">Обработка платежа...</p>
             <p className="text-sm text-gray-500 mb-2">
-              Ожидание подтверждения от Robokassa и создание VLESS конфига
+              Ожидание подтверждения от ЮKassa и создание VLESS конфига
             </p>
             <p className="text-xs text-gray-600">
               Это может занять несколько секунд. Пожалуйста, подождите...
@@ -280,29 +371,7 @@ function SuccessContent() {
               </Link>
             </div>
           </>
-        ) : (
-          <Card className="text-center">
-            <CardHeader>
-              <CardTitle>Оплата успешна!</CardTitle>
-              <CardDescription>
-                Ожидание подтверждения от Robokassa. Ваш конфиг будет доступен в профиле после обработки платежа.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <p className="text-sm text-gray-500">
-                Обработка платежа может занять несколько минут. Конфиг появится в вашем профиле автоматически после подтверждения от Robokassa.
-              </p>
-              <Link href="/profile">
-                <Button className="w-full">Перейти в профиль</Button>
-              </Link>
-              <Link href="/">
-                <Button variant="ghost" className="w-full">
-                  Вернуться на главную
-                </Button>
-              </Link>
-            </CardContent>
-          </Card>
-        )}
+        ) : null}
       </div>
     </div>
   );

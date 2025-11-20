@@ -1,17 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { plans, getPlanById } from "@/lib/plans";
-import { generateRobokassaUrl } from "@/lib/robokassa";
+import { createYooKassaPayment } from "@/lib/yookassa";
 
 /**
- * Генерирует URL для оплаты через Robokassa
+ * Создает платеж через ЮKassa и возвращает URL для редиректа и ID платежа ЮKassa
  */
 async function generatePaymentUrl(
   paymentId: string,
   amount: number,
   plan: ReturnType<typeof getPlanById>,
   baseUrl: string
-): Promise<string | null> {
+): Promise<{ url: string; yooKassaPaymentId: string } | null> {
   try {
     // Проверка, что plan не undefined
     if (!plan) {
@@ -26,135 +26,101 @@ async function generatePaymentUrl(
       return null;
     }
 
-    // Получаем настройки Robokassa
-    // ВАЖНО: Убираем все пробелы, включая начальные и конечные
-    
-    // Читаем тестовый режим: убираем пробелы и комментарии, проверяем "true" (регистронезависимо)
-    const testModeRaw = (process.env.ROBOKASSA_TEST_MODE || "").trim().toLowerCase();
-    // Убираем комментарии (всё после #)
-    const testModeValue = testModeRaw.split('#')[0].trim();
-    const isTest = testModeValue === "true";
-    
-    // ВАЖНО: В тестовом режиме нужно использовать ТОЛЬКО тестовые пароли!
-    // Согласно документации Robokassa: "Если вы используете тестовую среду Robokassa,
-    // передавая параметр IsTest=1, то необходимо использовать только тестовую пару технических паролей"
-    // Если ROBOKASSA_TEST_PASSWORD_1 не указан, используем ROBOKASSA_PASSWORD_1 (который должен быть тестовым)
-    const password_1Raw = isTest 
-      ? (process.env.ROBOKASSA_TEST_PASSWORD_1 || process.env.ROBOKASSA_PASSWORD_1 || "")
-      : (process.env.ROBOKASSA_PASSWORD_1 || "");
-    
-    const merchantLoginRaw = process.env.ROBOKASSA_MERCHANT_LOGIN || "";
-    const merchantLogin = merchantLoginRaw.trim();
-    const password_1 = password_1Raw.trim();
-    
-    console.log("🧪 Test mode check:", {
-      raw: process.env.ROBOKASSA_TEST_MODE,
-      trimmed: testModeRaw,
-      value: testModeValue,
-      isTest: isTest,
-      usingTestPassword: isTest && !!process.env.ROBOKASSA_TEST_PASSWORD_1,
-      passwordSource: isTest ? "TEST_PASSWORD_1 or PASSWORD_1" : "PASSWORD_1",
+    // Получаем настройки ЮKassa
+    const shopId = process.env.YOOKASSA_SHOP_ID?.trim() || "";
+    const secretKey = process.env.YOOKASSA_SECRET_KEY?.trim() || "";
+
+    console.log("🔑 YooKassa credentials check:", {
+      shopIdLength: shopId.length,
+      secretKeyLength: secretKey.length,
+      shopIdPreview: shopId ? shopId.substring(0, 10) + "..." : "missing",
+      hasShopId: !!shopId,
+      hasSecretKey: !!secretKey,
     });
 
     // Детальная проверка параметров
-    if (!merchantLogin) {
-      console.error("❌ ROBOKASSA_MERCHANT_LOGIN is not set or empty");
-      console.error("Raw value:", merchantLoginRaw ? `[${merchantLoginRaw.length} chars]` : "undefined");
+    if (!shopId) {
+      console.error("❌ YOOKASSA_SHOP_ID is not set or empty");
       return null;
     }
 
-    if (!password_1) {
-      console.error("❌ ROBOKASSA_PASSWORD_1 is not set or empty");
-      console.error("Raw value:", password_1Raw ? `[${password_1Raw.length} chars]` : "undefined");
+    if (!secretKey) {
+      console.error("❌ YOOKASSA_SECRET_KEY is not set or empty");
       return null;
     }
 
-    // Генерируем уникальный InvId на основе timestamp
-    // Robokassa требует неотрицательное целое число (может быть 0 для теста)
-    // ВАЖНО: Используем последние 9 цифр (не 10), чтобы избежать слишком больших чисел
-    // Максимальное значение: 999999999 (9 цифр), что меньше 2^31-1 (2147483647)
-    const timestamp = Date.now();
-    let invId = parseInt(timestamp.toString().slice(-9), 10); // Последние 9 цифр timestamp
-    
-    if (isNaN(invId) || invId < 0) {
-      console.error("❌ Invalid InvId generated:", invId, "from timestamp:", timestamp);
-      return null;
-    }
-    
-    // Дополнительная проверка: InvId не должен быть слишком большим
-    // Согласно документации: InvId может принимать значения от 1 до 9223372036854775807 (2^63 - 1)
-    // Для теста может быть 0
-    // 9 цифр максимум = 999999999, что намного меньше лимита (9223372036854775807)
-    const MAX_INV_ID = 9223372036854775807; // 2^63 - 1
-    if (invId > MAX_INV_ID) {
-      console.warn("⚠️ InvId too large, using modulo:", invId);
-      invId = invId % MAX_INV_ID;
-      // Примечание: 0 разрешен для теста согласно документации, но в реальном случае используем минимум 1
-      if (invId === 0 && !isTest) {
-        invId = 1; // Минимальное значение для реальных платежей (от 1 согласно документации)
-      }
-    }
-
-    console.log("💰 Payment initialization:", {
-      merchantLogin: merchantLogin.substring(0, 3) + "..." + merchantLogin.substring(merchantLogin.length - 3),
-      merchantLoginLength: merchantLogin.length,
-      password_1Length: password_1.length,
-      password_1FirstChar: password_1.substring(0, 1),
-      outSum: amountNumber.toFixed(2),
-      outSumType: typeof amountNumber,
-      outSumValue: amountNumber,
-      invId: invId,
-      invIdString: String(invId),
-      paymentId: paymentId,
-      isTest: isTest,
-      plan: plan?.name,
-    });
-
-    // ВАЖНО: Описание должно быть корректно закодировано для URL
-    // Согласно документации: максимальная длина 100 символов
-    // Описание должно содержать только символы английского или русского алфавита, цифры и знаки препинания
-    // Но в подпись оно НЕ входит, поэтому можно использовать любые символы
     // Проверяем, что plan не undefined (должно быть проверено выше, но TypeScript требует явной проверки)
     if (!plan) {
       console.error("❌ Plan is undefined when creating description");
       return null;
     }
-    
+
+    // Формируем описание платежа (макс 128 символов для ЮKassa)
     let description = `VLESS VPN подписка: ${plan.name} (${plan.duration} дней)`;
     
-    // Обрезаем описание до 100 символов, если оно слишком длинное
-    if (description.length > 100) {
-      description = description.substring(0, 97) + "...";
+    // Обрезаем описание до 128 символов, если оно слишком длинное
+    if (description.length > 128) {
+      description = description.substring(0, 125) + "...";
     }
 
-    // Генерируем URL для редиректа на Robokassa
-    // ВАЖНО: Передаем amountNumber как число (плавающую точку), а не строку
-    const paymentUrl = generateRobokassaUrl({
-      MerchantLogin: merchantLogin, // Уже обрезанный
-      OutSum: amountNumber,         // Число (плавающая точка), будет преобразовано в "99.00" внутри функции
-      InvId: invId,                 // Уже валидированное целое число
-      Description: description,
-      Password_1: password_1,       // Уже обрезанный
-      IsTest: isTest,
-      Culture: "ru",
-      Encoding: "utf-8",
-      ResultURL: `${baseUrl}/api/payment/callback`,
-      SuccessURL: `${baseUrl}/api/payment/success`,
-      FailURL: `${baseUrl}/api/payment/fail`,
-    });
+    // URL для редиректа после оплаты
+    const returnUrl = `${baseUrl}/api/payment/success?payment_id=${paymentId}`;
 
-    console.log("✅ Payment URL generated successfully:", {
-      paymentId,
-      invId,
+    console.log("💰 YooKassa payment initialization:", {
       amount: amountNumber.toFixed(2),
-      amountType: typeof amountNumber,
-      urlLength: paymentUrl.length,
-      urlPreview: paymentUrl.substring(0, 100) + "...",
+      description: description.substring(0, 50) + "...",
+      returnUrl: returnUrl.substring(0, 50) + "...",
+      plan: plan.name,
     });
 
-    return paymentUrl;
+    // Создаем платеж через ЮKassa API
+    console.log("🔄 Calling YooKassa API to create payment...");
+    const yooKassaPayment = await createYooKassaPayment({
+      amount: amountNumber,
+      description,
+      returnUrl,
+      shopId,
+      secretKey,
+      metadata: {
+        payment_id: paymentId, // Сохраняем наш внутренний ID платежа
+        plan_id: plan.id,
+        plan_name: plan.name,
+      },
+    });
+
+    if (!yooKassaPayment) {
+      console.error("❌ YooKassa payment creation returned null or undefined");
+      return null;
+    }
+
+    if (!yooKassaPayment.confirmation?.confirmation_url) {
+      console.error("❌ YooKassa payment created but no confirmation_url", {
+        paymentId: yooKassaPayment.id,
+        status: yooKassaPayment.status,
+        confirmation: yooKassaPayment.confirmation,
+      });
+      return null;
+    }
+
+    const confirmationUrl = yooKassaPayment.confirmation.confirmation_url;
+
+    console.log("✅ YooKassa payment created successfully:", {
+      internalPaymentId: paymentId,
+      yooKassaPaymentId: yooKassaPayment.id,
+      status: yooKassaPayment.status,
+      confirmationUrl: confirmationUrl.substring(0, 60) + "...",
+      amount: amountNumber.toFixed(2),
+    });
+
+    // ВАЖНО: Сохраняем ID платежа ЮKassa в нашу базу для сопоставления с webhook
+    // Это делается в вызывающей функции после создания платежа в БД
+
+    return {
+      url: confirmationUrl,
+      yooKassaPaymentId: yooKassaPayment.id,
+    };
   } catch (error: any) {
-    console.error("Error generating payment URL:", error);
+    console.error("❌ Error creating YooKassa payment:", error);
     return null;
   }
 }
@@ -304,13 +270,26 @@ export async function POST(request: NextRequest) {
           );
         }
 
-        // Генерируем URL для Robokassa
-        const paymentUrl = await generatePaymentUrl(paymentFallback.id, finalAmount, plan, baseUrl);
-        if (!paymentUrl) {
+        // Создаем платеж через ЮKassa
+        const paymentResult = await generatePaymentUrl(paymentFallback.id, finalAmount, plan, baseUrl);
+        if (!paymentResult || !paymentResult.url) {
           return NextResponse.json(
             { error: "Failed to generate payment URL" },
             { status: 500 }
           );
+        }
+
+        // Сохраняем ID платежа ЮKassa в базе (если есть колонка)
+        if (paymentResult.yooKassaPaymentId) {
+          await supabase
+            .from("payments")
+            .update({ yookassa_payment_id: paymentResult.yooKassaPaymentId })
+            .eq("id", paymentFallback.id)
+            .then(({ error }) => {
+              if (error && !error.message.includes("column") && error.code !== "PGRST116") {
+                console.warn("⚠️ Failed to save YooKassa payment ID:", error.message);
+              }
+            });
         }
 
         return NextResponse.json({ 
@@ -319,7 +298,7 @@ export async function POST(request: NextRequest) {
           originalAmount: plan.price,
           discount: plan.price - finalAmount,
           promocode: appliedPromocode,
-          paymentUrl,
+          paymentUrl: paymentResult.url,
         });
       }
 
@@ -329,13 +308,28 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Генерируем URL для Robokassa
-    const paymentUrl = await generatePaymentUrl(payment.id, finalAmount, plan, baseUrl);
-    if (!paymentUrl) {
+    // Создаем платеж через ЮKassa
+    const paymentResult = await generatePaymentUrl(payment.id, finalAmount, plan, baseUrl);
+    if (!paymentResult || !paymentResult.url) {
       return NextResponse.json(
         { error: "Failed to generate payment URL" },
         { status: 500 }
       );
+    }
+
+    // Сохраняем ID платежа ЮKassa в базе (если есть колонка yookassa_payment_id)
+    if (paymentResult.yooKassaPaymentId) {
+      await supabase
+        .from("payments")
+        .update({ yookassa_payment_id: paymentResult.yooKassaPaymentId })
+        .eq("id", payment.id)
+        .then(({ error }) => {
+          if (error && !error.message.includes("column") && error.code !== "PGRST116") {
+            console.warn("⚠️ Failed to save YooKassa payment ID:", error.message);
+          } else if (!error) {
+            console.log("✅ YooKassa payment ID saved to database:", paymentResult.yooKassaPaymentId);
+          }
+        });
     }
 
     return NextResponse.json({ 
@@ -344,7 +338,7 @@ export async function POST(request: NextRequest) {
       originalAmount: plan.price,
       discount: plan.price - finalAmount,
       promocode: appliedPromocode,
-      paymentUrl,
+      paymentUrl: paymentResult.url,
     });
   } catch (error: any) {
     console.error("Create payment error:", error);

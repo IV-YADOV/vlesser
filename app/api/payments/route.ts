@@ -4,7 +4,7 @@ import { createClient } from "@/lib/supabase/server";
 /**
  * API для получения информации о платеже
  * GET /api/payments?paymentId=xxx - поиск по UUID платежа
- * GET /api/payments?amount=xxx - поиск по сумме и времени (для InvId от Robokassa)
+ * GET /api/payments?amount=xxx - поиск по сумме и времени (fallback метод)
  */
 export async function GET(request: NextRequest) {
   try {
@@ -84,43 +84,22 @@ export async function GET(request: NextRequest) {
     }
 
     // Ищем подписку для этого платежа
-    // Пробуем сначала по payment_id, если колонки нет - пропускаем
-    let subscription = null;
-    const { data: subscriptionByPaymentId, error: paymentIdError } = await supabase
+    // ВАЖНО: Ищем по user_id и plan с фильтром по времени создания платежа
+    // Это гарантирует, что мы найдем подписку, созданную для этого конкретного платежа
+    const paymentCreatedAt = new Date(payment.created_at);
+    
+    const { data: subscription, error: subscriptionError } = await supabase
       .from("subscriptions")
       .select("*")
-      .eq("payment_id", payment.id)
+      .eq("user_id", payment.user_id)
+      .eq("plan", payment.plan)
+      .gte("created_at", paymentCreatedAt.toISOString()) // Только подписки, созданные после или одновременно с платежом
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
 
-    // Если ошибка из-за отсутствующей колонки payment_id, игнорируем
-    if (paymentIdError && (paymentIdError.code === "PGRST204" || paymentIdError.message?.includes("payment_id"))) {
-      console.warn("⚠️ payment_id column not found in subscriptions, skipping payment_id search");
-    } else if (!paymentIdError && subscriptionByPaymentId) {
-      subscription = subscriptionByPaymentId;
-    }
-
-    // Если не нашли по payment_id, ищем по user_id и plan
-    // ВАЖНО: Проверяем, что подписка создана ПОСЛЕ этого платежа
-    // Это предотвращает возврат старых подписок от предыдущих платежей
-    if (!subscription) {
-      const paymentCreatedAt = new Date(payment.created_at);
-      
-      const { data: subscriptionByUser } = await supabase
-        .from("subscriptions")
-        .select("*")
-        .eq("user_id", payment.user_id)
-        .eq("plan", payment.plan)
-        .gte("created_at", paymentCreatedAt.toISOString()) // Только подписки, созданные после платежа
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      return NextResponse.json({
-        payment,
-        subscription: subscriptionByUser || null,
-      });
+    if (subscriptionError && subscriptionError.code !== "PGRST116") {
+      console.error("❌ Error searching subscription:", subscriptionError);
     }
 
     return NextResponse.json({

@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createClient } from "@/lib/supabase/server";
 
 /**
- * Fail URL - редирект после неудачной оплаты от Robokassa
+ * Fail URL - редирект после неудачной оплаты или отмены от ЮKassa
  * Обрабатывает GET запрос от платежной системы
- * Документация: https://docs.robokassa.ru/pay-interface/
+ * Документация: https://yookassa.ru/developers/payment-acceptance/getting-started/payment-process
  */
 export async function GET(request: NextRequest) {
   try {
@@ -12,9 +13,42 @@ export async function GET(request: NextRequest) {
     console.log("❌ Fail URL called");
     console.log("📋 Params:", Object.fromEntries(searchParams.entries()));
     
-    // Параметры от Robokassa (могут отсутствовать при отказе)
-    const invId = searchParams.get("InvId");
-    const error = searchParams.get("error") || searchParams.get("message") || "Платеж отменен";
+    // Параметры от ЮKassa (payment_id - это наш внутренний ID платежа)
+    const paymentId = searchParams.get("payment_id");
+    const error = searchParams.get("error") || searchParams.get("message") || "Платеж не был завершен";
+    
+    // Обновляем статус платежа на failed, если он еще pending
+    if (paymentId) {
+      try {
+        const supabase = await createClient();
+        
+        // Получаем текущий платеж
+        const { data: payment, error: paymentError } = await supabase
+          .from("payments")
+          .select("*")
+          .eq("id", paymentId)
+          .single();
+        
+        if (!paymentError && payment && payment.status === "pending") {
+          console.log(`🔄 Updating payment ${paymentId} status from pending to failed`);
+          
+          // Обновляем статус на failed
+          const { error: updateError } = await supabase
+            .from("payments")
+            .update({ status: "failed" })
+            .eq("id", paymentId);
+          
+          if (updateError) {
+            console.error("❌ Error updating payment status:", updateError);
+          } else {
+            console.log(`✅ Payment ${paymentId} status updated to failed`);
+          }
+        }
+      } catch (error: any) {
+        console.error("❌ Error processing payment status update:", error);
+        // Продолжаем обработку, даже если не удалось обновить статус
+      }
+    }
 
     // Формируем URL для редиректа
     const host = request.headers.get("host") || 
@@ -24,8 +58,8 @@ export async function GET(request: NextRequest) {
                      (request.url.startsWith("https") ? "https" : "http");
     
     const queryParams = new URLSearchParams();
-    if (invId) {
-      queryParams.set("payment_id", invId);
+    if (paymentId) {
+      queryParams.set("payment_id", paymentId);
     }
     if (error) {
       queryParams.set("error", error);
