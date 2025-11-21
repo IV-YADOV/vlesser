@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Check, Copy, Loader2 } from "lucide-react";
 import Link from "next/link";
+import { TelegramUser, validateTelegramAuth } from "@/lib/auth";
 
 function SuccessContent() {
   const searchParams = useSearchParams();
@@ -13,6 +14,22 @@ function SuccessContent() {
   const [vlessLink, setVlessLink] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const paymentIdRef = useRef<string | null>(null);
+  const [userData, setUserData] = useState<TelegramUser | null>(null);
+
+  // Загружаем userData из localStorage
+  useEffect(() => {
+    const savedUser = localStorage.getItem("telegram_user");
+    if (savedUser) {
+      try {
+        const parsed = JSON.parse(savedUser);
+        if (validateTelegramAuth(parsed)) {
+          setUserData(parsed);
+        }
+      } catch {
+        // Игнорируем ошибки парсинга
+      }
+    }
+  }, []);
 
   useEffect(() => {
     // Инициализируем paymentId из параметра URL
@@ -76,17 +93,26 @@ function SuccessContent() {
         }
 
         // Проверяем через ЮKassa API, если нужно
+        // ВАЖНО: Для проверки статуса требуется авторизация
         if (shouldCheckYooKassa) {
-          console.log(`🔄 Checking payment status via YooKassa API: ${currentPaymentId}`);
-          res = await fetch("/api/payment/checkStatus", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ paymentId: currentPaymentId }),
-          });
+          if (!userData) {
+            console.warn("⚠️ User data not available, skipping YooKassa status check");
+            // Пропускаем проверку через YooKassa, если нет авторизации
+            res = await fetch(`/api/payments?paymentId=${currentPaymentId}`);
+          } else {
+            console.log(`🔄 Checking payment status via YooKassa API: ${currentPaymentId}`);
+            res = await fetch("/api/payment/checkStatus", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ paymentId: currentPaymentId, userData }),
+            });
+          }
         } else {
           // Обычная проверка через наш API
+          // Если есть userData, передаем его в query параметре
+          const userDataParam = userData ? `&userData=${encodeURIComponent(JSON.stringify(userData))}` : "";
           console.log(`🔍 Searching by paymentId: ${currentPaymentId}`);
-          res = await fetch(`/api/payments?paymentId=${currentPaymentId}`);
+          res = await fetch(`/api/payments?paymentId=${currentPaymentId}${userDataParam}`);
         }
 
         if (!res) {
@@ -293,7 +319,7 @@ function SuccessContent() {
         clearInterval(intervalId);
       }
     };
-  }, [paymentIdParam, amountParam]);
+  }, [paymentIdParam, amountParam, userData]);
 
   const copyToClipboard = async () => {
     if (!vlessLink) return;

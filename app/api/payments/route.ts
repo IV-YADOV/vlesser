@@ -11,6 +11,36 @@ export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
     const paymentId = searchParams.get("paymentId");
     const amount = searchParams.get("amount");
+    const userDataParam = searchParams.get("userData");
+
+    // Проверяем авторизацию, если передан userData
+    let authUserId: string | undefined = undefined;
+    if (userDataParam) {
+      try {
+        const userData = JSON.parse(userDataParam);
+        const { validateAuthFromData } = await import("@/lib/auth-utils");
+        const auth = await validateAuthFromData(userData);
+        
+        if (!auth.isValid) {
+          return NextResponse.json(
+            { error: auth.error || "Unauthorized" },
+            { status: 401 }
+          );
+        }
+        
+        authUserId = auth.userId;
+      } catch (error) {
+        return NextResponse.json(
+          { error: "Invalid userData format" },
+          { status: 400 }
+        );
+      }
+    } else {
+      // Для GET запросов userData может быть необязательным для просмотра статуса платежа
+      // Это позволяет пользователям видеть статус платежа после редиректа от YooKassa
+      // даже если localStorage очищен. Но операции (отмена, создание) требуют авторизации.
+      // Авторизация будет проверена только при проверке владения ресурсом (ниже)
+    }
 
     const supabase = await createClient();
 
@@ -80,6 +110,16 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(
         { error: "Payment not found" },
         { status: 404 }
+      );
+    }
+
+    // Проверяем, что платеж принадлежит авторизованному пользователю
+    // Если авторизация не предоставлена, разрешаем просмотр статуса платежа
+    // (полезно для страниц fail/success после редиректа от YooKassa)
+    if (authUserId && payment.user_id !== authUserId) {
+      return NextResponse.json(
+        { error: "Payment does not belong to this user" },
+        { status: 403 }
       );
     }
 

@@ -187,7 +187,35 @@ async function generatePaymentUrl(
 
 export async function POST(request: NextRequest) {
   try {
-    const { planId, userId, promocode, userEmail } = await request.json();
+    const body = await request.json();
+    const { planId, userId, promocode, userEmail, userData } = body;
+
+    // Проверяем авторизацию
+    if (userData) {
+      const { validateAuthFromData } = await import("@/lib/auth-utils");
+      const auth = await validateAuthFromData(userData);
+      
+      if (!auth.isValid) {
+        return NextResponse.json(
+          { error: auth.error || "Unauthorized" },
+          { status: 401 }
+        );
+      }
+      
+      // Проверяем, что userId совпадает с авторизованным пользователем
+      if (auth.userId !== userId) {
+        return NextResponse.json(
+          { error: "User ID mismatch" },
+          { status: 403 }
+        );
+      }
+    } else {
+      // Если userData не передан, требуем его для безопасности
+      return NextResponse.json(
+        { error: "Missing userData. Authentication required." },
+        { status: 401 }
+      );
+    }
 
     if (!planId || !userId) {
       return NextResponse.json(

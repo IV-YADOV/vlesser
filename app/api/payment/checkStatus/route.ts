@@ -7,12 +7,31 @@ import { getYooKassaPayment } from "@/lib/yookassa";
  */
 export async function POST(request: NextRequest) {
   try {
-    const { paymentId } = await request.json();
+    const body = await request.json();
+    const { paymentId, userData } = body;
 
     if (!paymentId) {
       return NextResponse.json(
         { error: "Missing paymentId" },
         { status: 400 }
+      );
+    }
+
+    // Проверяем авторизацию
+    if (userData) {
+      const { validateAuthFromData } = await import("@/lib/auth-utils");
+      const auth = await validateAuthFromData(userData);
+      
+      if (!auth.isValid) {
+        return NextResponse.json(
+          { error: auth.error || "Unauthorized" },
+          { status: 401 }
+        );
+      }
+    } else {
+      return NextResponse.json(
+        { error: "Missing userData. Authentication required." },
+        { status: 401 }
       );
     }
 
@@ -29,6 +48,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: "Payment not found" },
         { status: 404 }
+      );
+    }
+
+    // Проверяем, что платеж принадлежит авторизованному пользователю
+    const { validateAuthFromData } = await import("@/lib/auth-utils");
+    const auth = await validateAuthFromData(userData);
+    
+    if (auth.userId && payment.user_id !== auth.userId) {
+      return NextResponse.json(
+        { error: "Payment does not belong to this user" },
+        { status: 403 }
       );
     }
 

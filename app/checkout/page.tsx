@@ -134,6 +134,7 @@ function CheckoutContent() {
         body: JSON.stringify({ 
           planId: selectedPlan.id, 
           userId,
+          userData: user, // Передаем userData для проверки авторизации
           promocode: promocodeValid?.valid ? promocode : undefined,
         }),
       });

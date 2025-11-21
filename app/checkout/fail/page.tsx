@@ -5,12 +5,29 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { X, AlertCircle } from "lucide-react";
 import Link from "next/link";
+import { TelegramUser, validateTelegramAuth } from "@/lib/auth";
 
 function FailContent() {
   const searchParams = useSearchParams();
   const paymentId = searchParams.get("payment_id");
   const error = searchParams.get("error") || "Платеж не был завершен";
   const [statusUpdated, setStatusUpdated] = useState(false);
+  const [userData, setUserData] = useState<TelegramUser | null>(null);
+
+  // Загружаем userData из localStorage
+  useEffect(() => {
+    const savedUser = localStorage.getItem("telegram_user");
+    if (savedUser) {
+      try {
+        const parsed = JSON.parse(savedUser);
+        if (validateTelegramAuth(parsed)) {
+          setUserData(parsed);
+        }
+      } catch {
+        // Игнорируем ошибки парсинга
+      }
+    }
+  }, []);
 
   // Обновляем статус платежа при загрузке страницы, если он еще pending
   useEffect(() => {
@@ -18,24 +35,26 @@ function FailContent() {
       if (paymentId && !statusUpdated) {
         try {
           // Проверяем статус платежа через API
-          const res = await fetch(`/api/payments?paymentId=${paymentId}`);
+          // Если есть userData, передаем его в query параметре
+          const userDataParam = userData ? `&userData=${encodeURIComponent(JSON.stringify(userData))}` : "";
+          const res = await fetch(`/api/payments?paymentId=${paymentId}${userDataParam}`);
           
           if (res.ok) {
             const data = await res.json();
             const paymentStatus = data.payment?.status || data.status;
             
-            // Если платеж все еще pending - обновляем на failed через API
-            if (paymentStatus === "pending") {
+            // Если платеж все еще pending и есть userData - обновляем на failed через API
+            if (paymentStatus === "pending" && userData) {
               console.log(`🔄 Updating payment ${paymentId} status from pending to failed`);
               
               try {
-                // Обновляем статус через API
+                // Обновляем статус через API (требует авторизации)
                 const updateRes = await fetch("/api/payments/cancel", {
                   method: "POST",
                   headers: {
                     "Content-Type": "application/json",
                   },
-                  body: JSON.stringify({ paymentId }),
+                  body: JSON.stringify({ paymentId, userData }),
                 });
                 
               if (updateRes.ok) {
@@ -76,7 +95,7 @@ function FailContent() {
     };
     
     updatePaymentStatus();
-  }, [paymentId, statusUpdated]);
+  }, [paymentId, statusUpdated, userData]);
 
   return (
     <div className="pt-32 pb-20 px-4 sm:px-6 lg:px-8">
