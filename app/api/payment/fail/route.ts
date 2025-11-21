@@ -32,11 +32,12 @@ export async function GET(request: NextRequest) {
         if (!paymentError && payment && payment.status === "pending") {
           console.log(`🔄 Updating payment ${paymentId} status from pending to failed`);
           
-          // Обновляем статус на failed
+          // Обновляем статус на failed (используем failed вместо canceled, так как constraint в БД разрешает только pending/completed/failed)
           const { error: updateError } = await supabase
             .from("payments")
             .update({ status: "failed" })
-            .eq("id", paymentId);
+            .eq("id", paymentId)
+            .eq("status", "pending"); // Дополнительная проверка для безопасности
           
           if (updateError) {
             console.error("❌ Error updating payment status:", updateError);

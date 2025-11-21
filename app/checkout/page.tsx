@@ -3,13 +3,14 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { motion } from "framer-motion";
-import { useState, useEffect, Suspense } from "react";
+import { useState, useEffect, useRef, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { Check, Loader2, ArrowLeft } from "lucide-react";
 import { Plan } from "@/types/database";
 import Link from "next/link";
 import { TelegramUser, validateTelegramAuth, getUserIdFromTelegram } from "@/lib/auth";
 import { usePlans } from "@/hooks/usePlans";
+import { TelegramAuth } from "@/components/TelegramAuth";
 
 function CheckoutContent() {
   const searchParams = useSearchParams();
@@ -28,6 +29,7 @@ function CheckoutContent() {
     error?: string;
   } | null>(null);
   const [validatingPromocode, setValidatingPromocode] = useState(false);
+  const validatingUserRef = useRef(false); // Защита от повторных запросов валидации
 
   useEffect(() => {
     const plan = planData.find((p) => p.id === planId);
@@ -37,21 +39,29 @@ function CheckoutContent() {
   useEffect(() => {
     // Загружаем и валидируем пользователя
     const loadAndValidateUser = async () => {
+      // Предотвращаем повторные запросы
+      if (validatingUserRef.current) return;
+      
       const savedUser = localStorage.getItem("telegram_user");
       if (savedUser) {
         try {
           const parsed = JSON.parse(savedUser);
           if (validateTelegramAuth(parsed)) {
-            const validationRes = await fetch("/api/validateTelegramAuth", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(parsed),
-            });
+            validatingUserRef.current = true;
+            try {
+              const validationRes = await fetch("/api/validateTelegramAuth", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(parsed),
+              });
 
-            if (validationRes.ok) {
-              setUser(parsed);
-            } else {
-              localStorage.removeItem("telegram_user");
+              if (validationRes.ok) {
+                setUser(parsed);
+              } else {
+                localStorage.removeItem("telegram_user");
+              }
+            } finally {
+              validatingUserRef.current = false;
             }
           }
         } catch {
@@ -65,6 +75,7 @@ function CheckoutContent() {
 
     // Слушаем событие успешной авторизации
     const handleAuthSuccess = () => {
+      validatingUserRef.current = false; // Сбрасываем флаг для нового запроса после авторизации
       loadAndValidateUser();
     };
 
@@ -72,7 +83,8 @@ function CheckoutContent() {
     return () => {
       window.removeEventListener("telegram-auth-success", handleAuthSuccess);
     };
-  }, [planId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Убираем planId из зависимостей, так как он не влияет на валидацию пользователя
 
   const validatePromocode = async (code: string) => {
     if (!code || !selectedPlan) return;
@@ -185,6 +197,9 @@ function CheckoutContent() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
+              <div className="flex justify-center">
+                <TelegramAuth />
+              </div>
               <Link href="/">
                 <Button variant="outline" className="w-full">
                   <ArrowLeft className="mr-2 w-4 h-4" />

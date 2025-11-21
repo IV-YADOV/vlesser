@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { Plan } from "@/types/database";
 import { plans as defaultPlans } from "@/lib/plans";
 
@@ -8,9 +8,14 @@ export function usePlans() {
   const [planList, setPlanList] = useState<Plan[]>(defaultPlans);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const loadingRef = useRef(false); // Защита от повторных запросов
 
   const loadPlans = useCallback(async () => {
+    // Предотвращаем повторные запросы
+    if (loadingRef.current) return;
+    
     try {
+      loadingRef.current = true;
       setLoading(true);
       const response = await fetch("/api/plans");
       const data = await response.json();
@@ -26,12 +31,14 @@ export function usePlans() {
       setError("Не удалось загрузить тарифы");
     } finally {
       setLoading(false);
+      loadingRef.current = false;
     }
   }, []);
 
   useEffect(() => {
     loadPlans();
-  }, [loadPlans]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Убираем loadPlans из зависимостей, чтобы избежать повторных вызовов
 
   return {
     plans: planList,

@@ -25,7 +25,9 @@ PYTHON_XRAY_SERVICE_URL=http://localhost:5000
 ADMIN_SECRET_TOKEN=...
 YOOKASSA_SHOP_ID=...
 YOOKASSA_SECRET_KEY=...
-YOOKASSA_REQUIRE_RECEIPT=true  # Опционально: если true, всегда формирует receipt
+YOOKASSA_REQUIRE_RECEIPT=true  # По умолчанию true - всегда формирует receipt (можно установить false для отключения)
+SKIP_WEBHOOK_SIGNATURE_CHECK=false  # Только для dev/ngrok - пропускать проверку подписи webhook (НЕ использовать в production!)
+ALLOW_WEBHOOK_FROM_ANY_IP=false  # Только для dev/ngrok - разрешить webhook с любых IP (НЕ использовать в production!)
 ```
 
 **Примечание о receipt (чеках 54-ФЗ):**
@@ -34,9 +36,31 @@ YOOKASSA_REQUIRE_RECEIPT=true  # Опционально: если true, всег
 - НДС по умолчанию: 20% (код 1). Для изменения отредактируйте `vat_code` в `app/api/createPayment/route.ts`
 - Если YooKassa не требует receipt, можно отключить его в настройках YooKassa или установить `YOOKASSA_REQUIRE_RECEIPT=false`
 
+**Безопасность webhook:**
+- Webhook проверяет подпись `X-Content-HMAC-SHA256` (HMAC-SHA256 подпись тела запроса)
+- Webhook проверяет IP-адрес отправителя (только IP-адреса YooKassa разрешены в production)
+- В development/ngrok можно временно отключить проверки через `SKIP_WEBHOOK_SIGNATURE_CHECK=true` и `ALLOW_WEBHOOK_FROM_ANY_IP=true`
+- ⚠️ **НИКОГДА не используйте эти флаги в production!**
+
 ### Поддержка
 - Пользователь создаёт тикет через `/support` в боте.
 - Сотрудники с ролями `owner/admin/support` управляют тикетами через `/staff` (бот) и `/admin` (веб-панель).
+
+### Миграция базы данных
+
+#### Обновление таблицы auth_tokens (обязательно):
+Для безопасной авторизации необходимо выполнить миграцию:
+```bash
+# Запустите supabase_auth_tokens_migration.sql в SQL Editor Supabase
+```
+Эта миграция добавляет поля `status` и `telegram_id` в таблицу `auth_tokens` для проверки одноразовости токенов и привязки к пользователю.
+
+#### Обновление таблицы users (обязательно):
+Для сохранения данных пользователя из Telegram необходимо выполнить миграцию:
+```bash
+# Запустите supabase_users_migration.sql в SQL Editor Supabase
+```
+Эта миграция добавляет поля `first_name`, `last_name`, `username`, `photo_url` в таблицу `users` для хранения данных пользователя из Telegram.
 
 ### Очистка тестовых данных
 

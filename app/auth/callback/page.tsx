@@ -18,33 +18,18 @@ function AuthCallbackContent() {
     const handleAuth = async () => {
       try {
         const token = searchParams.get("token");
-        const tgId = searchParams.get("tg_id");
-        const firstName = searchParams.get("first_name");
-        const lastName = searchParams.get("last_name");
-        const username = searchParams.get("username");
 
-        if (!token || !tgId || !firstName) {
+        if (!token) {
           setStatus("error");
-          setErrorMessage("Недостаточно данных для авторизации");
+          setErrorMessage("Токен авторизации не найден");
           return;
         }
 
-        // Формируем объект пользователя
-        const userData: TelegramUser = {
-          id: parseInt(tgId),
-          first_name: firstName,
-          last_name: lastName || undefined,
-          username: username || undefined,
-          photo_url: searchParams.get("photo_url") || undefined,
-          auth_date: Math.floor(Date.now() / 1000),
-          hash: token, // Используем токен как hash для простоты
-        };
-
-        // Отправляем на сервер для авторизации
+        // Отправляем на сервер для авторизации (только токен, данные получаем из БД)
         const response = await fetch("/api/telegramAuth", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token, userData }),
+          body: JSON.stringify({ token }),
         });
 
         if (!response.ok) {
@@ -55,7 +40,18 @@ function AuthCallbackContent() {
         }
 
         const result = await response.json();
-        if (result.success) {
+        if (result.success && result.user) {
+          // Формируем объект пользователя для localStorage
+          const userData: TelegramUser = {
+            id: result.user.id,
+            first_name: result.user.first_name,
+            last_name: result.user.last_name,
+            username: result.user.username,
+            photo_url: result.user.photo_url,
+            auth_date: Math.floor(Date.now() / 1000),
+            hash: token, // Используем токен как hash
+          };
+          
           // Сохраняем пользователя
           localStorage.setItem("telegram_user", JSON.stringify(userData));
           setStatus("success");

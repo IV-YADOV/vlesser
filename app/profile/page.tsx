@@ -3,12 +3,11 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { motion } from "framer-motion";
-import { useState, useEffect } from "react";
-import { createClient } from "@/lib/supabase/client";
+import { useState, useEffect, useRef } from "react";
 import { Copy, CheckCircle2, Calendar, Key, ArrowLeft, LogIn, LogOut } from "lucide-react";
 import Link from "next/link";
 import { format } from "date-fns";
-import { TelegramUser, validateTelegramAuth, getUserIdFromTelegram } from "@/lib/auth";
+import { TelegramUser, validateTelegramAuth } from "@/lib/auth";
 
 interface Subscription {
   id: string;
@@ -23,15 +22,19 @@ export default function ProfilePage() {
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState<string | null>(null);
-  const supabase = createClient();
+  const loadingRef = useRef(false); // Защита от повторных запросов
 
   useEffect(() => {
+    // Предотвращаем повторные запросы
+    if (loadingRef.current) return;
+    
     const savedUser = localStorage.getItem("telegram_user");
     if (savedUser) {
       try {
         const parsed = JSON.parse(savedUser);
         if (validateTelegramAuth(parsed)) {
           setUser(parsed);
+          loadingRef.current = true;
           loadSubscriptions(parsed);
         } else {
           setLoading(false);
@@ -47,36 +50,31 @@ export default function ProfilePage() {
 
   const loadSubscriptions = async (userData: TelegramUser) => {
     try {
-      // Валидируем через API
-      const validationRes = await fetch("/api/validateTelegramAuth", {
+      // Получаем подписки через API
+      const response = await fetch("/api/subscriptions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(userData),
+        body: JSON.stringify({ userData }),
       });
 
-      if (!validationRes.ok) {
-        localStorage.removeItem("telegram_user");
-        setUser(null);
-        setLoading(false);
-        return;
-      }
-
-      const userId = getUserIdFromTelegram(userData);
-      const { data, error } = await supabase
-        .from("subscriptions")
-        .select("*")
-        .eq("user_id", userId)
-        .order("created_at", { ascending: false });
-
-      if (error) {
-        console.error("Error loading subscriptions:", error);
+      if (!response.ok) {
+        if (response.status === 401) {
+          localStorage.removeItem("telegram_user");
+          setUser(null);
+        }
+        const errorText = await response.text();
+        console.error("Error loading subscriptions:", errorText);
+        setSubscriptions([]);
       } else {
-        setSubscriptions(data || []);
+        const result = await response.json();
+        setSubscriptions(result.subscriptions || []);
       }
     } catch (error) {
       console.error("Error loading subscriptions:", error);
+      setSubscriptions([]);
     } finally {
       setLoading(false);
+      loadingRef.current = false; // Разблокируем для возможных повторных запросов
     }
   };
 

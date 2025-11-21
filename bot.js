@@ -595,39 +595,131 @@ bot.onText(/\/start (.+)/, async (msg, match) => {
 
   console.log(`🔐 Запрос авторизации от пользователя ${user.id} с токеном ${authToken}`);
 
-  const params = new URLSearchParams({
-    token: authToken,
-    tg_id: user.id.toString(),
-    first_name: user.first_name,
-    last_name: user.last_name || '',
-    username: user.username || '',
-  });
-  const authUrl = `${siteUrl}/auth/callback?${params.toString()}`;
+  if (!supabase) {
+    await bot.sendMessage(chatId, '❌ Ошибка: Supabase не инициализирован. Обратитесь к администратору.');
+    return;
+  }
 
-  const options = {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          {
-            text: '🔐 Авторизоваться на сайте',
-            url: authUrl,
-          },
-        ],
-        [
-          {
-            text: '📞 Нужна поддержка',
-            callback_data: 'support_menu',
-          },
-        ],
-      ],
-    },
-  };
+  try {
+    // Проверяем токен в БД
+    const { data: tokenRecord, error: tokenError } = await supabase
+      .from('auth_tokens')
+      .select('*')
+      .eq('token', authToken)
+      .single();
 
-  await bot.sendMessage(
-    chatId,
-    `👋 Привет, ${user.first_name}!\n\nДля авторизации на сайте нажмите кнопку ниже или откройте меню поддержки.`,
-    options
-  );
+    if (tokenError || !tokenRecord) {
+      console.error('Токен не найден:', tokenError);
+      await bot.sendMessage(
+        chatId,
+        '❌ Токен авторизации не найден или истек. Пожалуйста, попробуйте авторизоваться заново с сайта.'
+      );
+      return;
+    }
+
+    // Проверяем статус токена
+    if (tokenRecord.status !== 'waiting') {
+      await bot.sendMessage(
+        chatId,
+        '❌ Этот токен уже использован. Пожалуйста, попробуйте авторизоваться заново с сайта.'
+      );
+      return;
+    }
+
+    // Проверяем срок действия токена
+    const expiresAt = new Date(tokenRecord.expires_at);
+    const now = new Date();
+    if (expiresAt < now) {
+      await bot.sendMessage(
+        chatId,
+        '❌ Токен авторизации истек. Пожалуйста, попробуйте авторизоваться заново с сайта.'
+      );
+      return;
+    }
+
+    // Сохраняем пользователя в Supabase с полными данными
+    const userId = `tg_${user.id}`;
+    const { error: userError } = await supabase.from('users').upsert({
+      id: userId,
+      tg_id: user.id.toString(),
+      first_name: user.first_name,
+      last_name: user.last_name || null,
+      username: user.username || null,
+      photo_url: user.photo_url || null,
+    }, {
+      onConflict: 'id',
+    });
+    
+    if (userError) {
+      console.error('Ошибка сохранения пользователя:', userError);
+      // Если ошибка из-за отсутствия колонок, пробуем без них
+      const { error: fallbackError } = await supabase.from('users').upsert({
+        id: userId,
+        tg_id: user.id.toString(),
+      }, {
+        onConflict: 'id',
+      });
+      
+      if (fallbackError) {
+        await bot.sendMessage(chatId, '❌ Ошибка при сохранении данных. Попробуйте позже.');
+        return;
+      }
+    }
+
+    if (userError) {
+      console.error('Ошибка сохранения пользователя:', userError);
+      await bot.sendMessage(chatId, '❌ Ошибка при сохранении данных. Попробуйте позже.');
+      return;
+    }
+
+    // Привязываем telegram_id к токену и помечаем как использованный
+    const { error: updateError } = await supabase
+      .from('auth_tokens')
+      .update({
+        telegram_id: user.id.toString(),
+        status: 'used',
+      })
+      .eq('token', authToken);
+
+    if (updateError) {
+      console.error('Ошибка обновления токена:', updateError);
+      await bot.sendMessage(chatId, '❌ Ошибка при обновлении токена. Попробуйте позже.');
+      return;
+    }
+
+    console.log(`✅ Пользователь ${user.id} успешно авторизован с токеном ${authToken}`);
+
+    // Отправляем пользователя на сайт только с токеном
+    const authUrl = `${siteUrl}/auth/callback?token=${authToken}`;
+
+    const options = {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: '🔐 Перейти на сайт',
+              url: authUrl,
+            },
+          ],
+          [
+            {
+              text: '📞 Нужна поддержка',
+              callback_data: 'support_menu',
+            },
+          ],
+        ],
+      },
+    };
+
+    await bot.sendMessage(
+      chatId,
+      `✅ Авторизация успешна, ${user.first_name}!\n\nНажмите кнопку ниже, чтобы перейти на сайт.`,
+      options
+    );
+  } catch (error) {
+    console.error('Ошибка при авторизации:', error);
+    await bot.sendMessage(chatId, '❌ Произошла ошибка при авторизации. Попробуйте позже.');
+  }
 });
 
 // /start without token

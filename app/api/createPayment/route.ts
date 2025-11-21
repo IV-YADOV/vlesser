@@ -68,13 +68,16 @@ async function generatePaymentUrl(
     const returnUrl = `${baseUrl}/api/payment/success?payment_id=${paymentId}`;
 
     // Формируем receipt для YooKassa (54-ФЗ)
-    // Receipt обязателен, если в настройках YooKassa включена обязательная отправка чеков
+    // ВАЖНО: В production YooKassa может требовать receipt, поэтому всегда формируем его
+    // Если в настройках YooKassa включена обязательная отправка чеков, receipt обязателен
     let receipt: any = undefined;
     
-    // Если есть email пользователя, формируем receipt
-    // Если email нет, но YooKassa требует receipt - используем placeholder email
-    if (userEmail || process.env.YOOKASSA_REQUIRE_RECEIPT === 'true') {
-      const customerEmail = userEmail || `user_${paymentId}@vlesser.ru`; // Placeholder email если нет реального
+    // Всегда формируем receipt для production (можно отключить через переменную окружения)
+    const requireReceipt = process.env.YOOKASSA_REQUIRE_RECEIPT !== 'false'; // По умолчанию true
+    
+    if (requireReceipt) {
+      // Используем email пользователя, если передан, иначе placeholder
+      const customerEmail = userEmail || `user_${paymentId.substring(0, 8)}@vlesser.ru`; // Placeholder email
       
       receipt = {
         customer: {
@@ -82,7 +85,7 @@ async function generatePaymentUrl(
         },
         items: [
           {
-            description: description.substring(0, 128), // Описание товара/услуги
+            description: description.substring(0, 128), // Описание товара/услуги (макс 128 символов)
             quantity: "1.00", // Количество
             amount: {
               value: amountNumber.toFixed(2), // Сумма за единицу
@@ -90,6 +93,7 @@ async function generatePaymentUrl(
             },
             vat_code: 1, // НДС 20% (код 1) - для услуг в РФ обычно 20%
             // Если без НДС, используйте vat_code: 0
+            // Коды НДС: 1 = 20%, 2 = 10%, 3 = 20/120, 4 = 10/110, 5 = 0%, 6 = без НДС
           },
         ],
       };
@@ -98,7 +102,11 @@ async function generatePaymentUrl(
         customerEmail: customerEmail,
         itemsCount: receipt.items.length,
         totalAmount: amountNumber.toFixed(2),
+        vatCode: receipt.items[0].vat_code,
+        description: receipt.items[0].description.substring(0, 50) + "...",
       });
+    } else {
+      console.log("📋 Receipt not generated (YOOKASSA_REQUIRE_RECEIPT=false)");
     }
 
     console.log("💰 YooKassa payment initialization:", {
@@ -387,15 +395,53 @@ export async function POST(request: NextRequest) {
           );
         }
 
-        // Сохраняем ID платежа ЮKassa в базе (если есть колонка)
+        // Сохраняем ID платежа ЮKassa и expires_at в базе
         if (paymentResult.yooKassaPaymentId) {
+          // Получаем полные данные платежа от YooKassa для получения expires_at
+          const { getYooKassaPayment } = await import("@/lib/yookassa");
+          const shopId = process.env.YOOKASSA_SHOP_ID?.trim() || "";
+          const secretKey = process.env.YOOKASSA_SECRET_KEY?.trim() || "";
+          
+          let expiresAt: string | undefined = undefined;
+          
+          // Пытаемся получить expires_at из ответа YooKassa
+          try {
+            const fullPaymentData = await getYooKassaPayment(paymentResult.yooKassaPaymentId, shopId, secretKey);
+            if (fullPaymentData?.expires_at) {
+              expiresAt = fullPaymentData.expires_at;
+            }
+          } catch (error) {
+            // Если не удалось получить, используем дефолтное значение (15 минут)
+            console.warn("⚠️ Could not fetch payment details from YooKassa, using default expiration time");
+            expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString(); // 15 минут
+          }
+          
+          // Если expires_at не получен, устанавливаем дефолтное значение
+          if (!expiresAt) {
+            expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString(); // 15 минут
+          }
+          
+          const updateData: any = { 
+            yookassa_payment_id: paymentResult.yooKassaPaymentId 
+          };
+          
+          // Добавляем expires_at только если колонка существует
+          if (expiresAt) {
+            updateData.expires_at = expiresAt;
+          }
+          
           await supabase
             .from("payments")
-            .update({ yookassa_payment_id: paymentResult.yooKassaPaymentId })
+            .update(updateData)
             .eq("id", paymentFallback.id)
             .then(({ error }) => {
               if (error && !error.message.includes("column") && error.code !== "PGRST116") {
-                console.warn("⚠️ Failed to save YooKassa payment ID:", error.message);
+                console.warn("⚠️ Failed to save YooKassa payment data:", error.message);
+              } else if (!error) {
+                console.log("✅ YooKassa payment data saved to database (fallback):", {
+                  yooKassaPaymentId: paymentResult.yooKassaPaymentId,
+                  expiresAt: expiresAt ? new Date(expiresAt).toLocaleString() : "not set",
+                });
               }
             });
         }
@@ -448,17 +494,53 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Сохраняем ID платежа ЮKassa в базе (если есть колонка yookassa_payment_id)
+    // Сохраняем ID платежа ЮKassa и expires_at в базе
     if (paymentResult.yooKassaPaymentId) {
+      // Получаем полные данные платежа от YooKassa для получения expires_at
+      const { getYooKassaPayment } = await import("@/lib/yookassa");
+      const shopId = process.env.YOOKASSA_SHOP_ID?.trim() || "";
+      const secretKey = process.env.YOOKASSA_SECRET_KEY?.trim() || "";
+      
+      let expiresAt: string | undefined = undefined;
+      
+      // Пытаемся получить expires_at из ответа YooKassa
+      try {
+        const fullPaymentData = await getYooKassaPayment(paymentResult.yooKassaPaymentId, shopId, secretKey);
+        if (fullPaymentData?.expires_at) {
+          expiresAt = fullPaymentData.expires_at;
+        }
+      } catch (error) {
+        // Если не удалось получить, используем дефолтное значение (15 минут)
+        console.warn("⚠️ Could not fetch payment details from YooKassa, using default expiration time");
+        expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString(); // 15 минут
+      }
+      
+      // Если expires_at не получен, устанавливаем дефолтное значение
+      if (!expiresAt) {
+        expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString(); // 15 минут
+      }
+      
+      const updateData: any = { 
+        yookassa_payment_id: paymentResult.yooKassaPaymentId 
+      };
+      
+      // Добавляем expires_at только если колонка существует
+      if (expiresAt) {
+        updateData.expires_at = expiresAt;
+      }
+      
       await supabase
         .from("payments")
-        .update({ yookassa_payment_id: paymentResult.yooKassaPaymentId })
+        .update(updateData)
         .eq("id", payment.id)
         .then(({ error }) => {
           if (error && !error.message.includes("column") && error.code !== "PGRST116") {
-            console.warn("⚠️ Failed to save YooKassa payment ID:", error.message);
+            console.warn("⚠️ Failed to save YooKassa payment data:", error.message);
           } else if (!error) {
-            console.log("✅ YooKassa payment ID saved to database:", paymentResult.yooKassaPaymentId);
+            console.log("✅ YooKassa payment data saved to database:", {
+              yooKassaPaymentId: paymentResult.yooKassaPaymentId,
+              expiresAt: expiresAt ? new Date(expiresAt).toLocaleString() : "not set",
+            });
           }
         });
     }

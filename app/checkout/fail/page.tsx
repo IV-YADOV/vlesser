@@ -24,23 +24,50 @@ function FailContent() {
             const data = await res.json();
             const paymentStatus = data.payment?.status || data.status;
             
-            // Если платеж все еще pending - обновляем на failed
+            // Если платеж все еще pending - обновляем на failed через API
             if (paymentStatus === "pending") {
               console.log(`🔄 Updating payment ${paymentId} status from pending to failed`);
               
-              // Пытаемся обновить статус через API (опционально)
-              // В основном статус обновляется через fail route, но для надежности делаем проверку
-              const updateRes = await fetch("/api/payment/fail", {
-                method: "GET",
-              });
-              
+              try {
+                // Обновляем статус через API
+                const updateRes = await fetch("/api/payments/cancel", {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                  },
+                  body: JSON.stringify({ paymentId }),
+                });
+                
               if (updateRes.ok) {
-                console.log(`✅ Payment status updated to failed`);
+                const updateData = await updateRes.json();
+                console.log(`✅ Payment status updated to failed:`, updateData);
+                } else {
+                  // Пытаемся получить текст ошибки
+                  let errorText = "";
+                  try {
+                    const errorData = await updateRes.json();
+                    errorText = errorData.error || errorData.details || JSON.stringify(errorData);
+                  } catch {
+                    errorText = await updateRes.text().catch(() => `HTTP ${updateRes.status}`);
+                  }
+                  console.warn("⚠️ Failed to update payment status:", {
+                    status: updateRes.status,
+                    error: errorText,
+                  });
+                  // Не критично, продолжаем работу
+                }
+              } catch (fetchError: any) {
+                console.warn("⚠️ Error calling cancel API:", fetchError.message);
+                // Не критично, продолжаем работу
               }
+            } else {
+              console.log(`ℹ️ Payment ${paymentId} already has status: ${paymentStatus}, no update needed`);
             }
+          } else {
+            console.warn("⚠️ Failed to fetch payment status:", res.status);
           }
-        } catch (error) {
-          console.error("❌ Error updating payment status:", error);
+        } catch (error: any) {
+          console.warn("⚠️ Error updating payment status:", error.message);
           // Продолжаем, даже если не удалось обновить
         } finally {
           setStatusUpdated(true);

@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { Button } from "@/components/ui/button";
-import { createClient } from "@/lib/supabase/client";
-import { TelegramUser, validateTelegramAuth, getUserIdFromTelegram } from "@/lib/auth";
+import { TelegramUser, validateTelegramAuth } from "@/lib/auth";
 import { LogIn, User } from "lucide-react";
 import Link from "next/link";
 
@@ -13,10 +12,14 @@ declare global {
   }
 }
 
-export function TelegramAuth() {
+interface TelegramAuthProps {
+  onLinkClick?: () => void; // Callback для закрытия меню при клике на ссылку
+}
+
+export function TelegramAuth({ onLinkClick }: TelegramAuthProps) {
   const [user, setUser] = useState<TelegramUser | null>(null);
   const [loading, setLoading] = useState(true);
-  const supabase = createClient();
+  const validatingRef = useRef(false); // Защита от повторных запросов валидации
 
   // Функция проверки пользователя
   const checkSavedUser = async (skipValidation = false) => {
@@ -34,8 +37,12 @@ export function TelegramAuth() {
             return;
           }
           
+          // Предотвращаем повторные запросы валидации
+          if (validatingRef.current) return;
+          
           // Затем валидируем через API в фоне (только если не пропущено)
           try {
+            validatingRef.current = true;
             const validationRes = await fetch("/api/validateTelegramAuth", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -57,6 +64,8 @@ export function TelegramAuth() {
           } catch (error) {
             console.error("Validation error:", error);
             // При ошибке оставляем пользователя (может быть временная проблема с сетью)
+          } finally {
+            validatingRef.current = false;
           }
         } else {
           localStorage.removeItem("telegram_user");
@@ -82,8 +91,13 @@ export function TelegramAuth() {
     if (savedUser) {
       // Быстрая проверка без API для мгновенного отображения
       checkSavedUser(true);
-      // Полная валидация в фоне
-      setTimeout(() => checkSavedUser(false), 100);
+      // Полная валидация в фоне (с небольшой задержкой, чтобы не блокировать UI)
+      // Используем requestIdleCallback если доступен, иначе setTimeout
+      if (typeof window !== "undefined" && "requestIdleCallback" in window) {
+        requestIdleCallback(() => checkSavedUser(false), { timeout: 500 });
+      } else {
+        setTimeout(() => checkSavedUser(false), 100);
+      }
     } else {
       checkSavedUser(false);
     }
@@ -163,12 +177,9 @@ export function TelegramAuth() {
 
   const saveUserToSupabase = async (userData: TelegramUser) => {
     try {
-      const userId = getUserIdFromTelegram(userData);
-      const { error } = await supabase.from("users").upsert({
-        id: userId,
-        tg_id: userData.id.toString(),
-      });
-      if (error) console.error("Error saving user:", error);
+      // Сохранение пользователя теперь происходит в боте
+      // Эта функция оставлена для обратной совместимости, но не используется
+      // Можно удалить в будущем
     } catch (error) {
       console.error("Error saving user to Supabase:", error);
     }
@@ -185,7 +196,10 @@ export function TelegramAuth() {
 
   if (user) {
     return (
-      <Link href="/profile">
+      <Link 
+        href="/profile"
+        onClick={onLinkClick}
+      >
         <Button variant="ghost" size="sm" className="bg-gradient-to-r from-blue-600 to-purple-600 text-white hover:from-blue-500 hover:to-purple-500">
           <User className="w-4 h-4 mr-2" />
           Профиль

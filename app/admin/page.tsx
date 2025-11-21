@@ -3,7 +3,6 @@ import { useState, useEffect } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { createClient } from "@/lib/supabase/client";
 import { Users, ShoppingCart, Key, Search, DollarSign, TrendingUp, Ticket, Plus, Trash2, Shield, LifeBuoy, MessageSquare } from "lucide-react";
 import { format } from "date-fns";
 import { motion } from "framer-motion";
@@ -42,7 +41,6 @@ export default function AdminPage() {
   const [ticketReply, setTicketReply] = useState("");
   const getAdminHeaderToken = () => adminToken || localStorage.getItem("admin_token") || "";
   const shortTicketId = (id: string) => `#${id?.split("-")[0]}`;
-  const supabase = createClient();
 
   useEffect(() => {
     // Проверяем авторизацию админа
@@ -84,13 +82,23 @@ export default function AdminPage() {
 
   const loadData = async () => {
     try {
+      const token = adminToken || localStorage.getItem("admin_token") || "";
+      const headers = { "x-admin-token": token };
+
       const [usersRes, paymentsRes, subsRes, promocodesRes, planRes] = await Promise.all([
-        supabase.from("users").select("*").order("created_at", { ascending: false }),
-        supabase.from("payments").select("*").order("created_at", { ascending: false }),
-        supabase.from("subscriptions").select("*").order("created_at", { ascending: false }),
-        fetch("/api/promocodes/list", {
-          headers: { "x-admin-token": adminToken || localStorage.getItem("admin_token") || "" },
-        })
+        fetch("/api/users", { headers })
+          .then((res) => res.json())
+          .then((data) => data.users || [])
+          .catch(() => []),
+        fetch("/api/payments/admin", { headers })
+          .then((res) => res.json())
+          .then((data) => data.payments || [])
+          .catch(() => []),
+        fetch("/api/subscriptions/admin", { headers })
+          .then((res) => res.json())
+          .then((data) => data.subscriptions || [])
+          .catch(() => []),
+        fetch("/api/promocodes/list", { headers })
           .then((res) => res.json())
           .then((data) => data.promocodes || [])
           .catch(() => []),
@@ -100,9 +108,9 @@ export default function AdminPage() {
           .catch(() => defaultPlans),
       ]);
       
-      if (usersRes.data) setUsers(usersRes.data);
-      if (paymentsRes.data) setPayments(paymentsRes.data);
-      if (subsRes.data) setSubscriptions(subsRes.data);
+      if (usersRes) setUsers(usersRes);
+      if (paymentsRes) setPayments(paymentsRes);
+      if (subsRes) setSubscriptions(subsRes);
       if (promocodesRes) setPromocodes(promocodesRes);
       if (planRes) {
         setPlanSettings(planRes);

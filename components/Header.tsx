@@ -14,7 +14,11 @@ export function Header() {
     <header className="fixed top-0 left-0 right-0 z-50 bg-[#0a0a0a]/80 backdrop-blur-xl border-b border-gray-900">
       <div className="container mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-20">
-          <Link href="/" className="flex items-center space-x-2">
+          <Link 
+            href="/" 
+            className="flex items-center space-x-2"
+            onClick={() => setMobileMenuOpen(false)}
+          >
             <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-600 to-purple-600 flex items-center justify-center">
               <Shield className="w-6 h-6 text-white" />
             </div>
@@ -83,7 +87,7 @@ export function Header() {
                 Инструкция
               </Link>
               <div className="pt-2 border-t border-gray-900">
-                <TelegramAuth />
+                <TelegramAuth onLinkClick={() => setMobileMenuOpen(false)} />
               </div>
             </div>
           </motion.div>

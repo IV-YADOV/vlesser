@@ -10,20 +10,24 @@ export async function POST(request: NextRequest) {
     const token = crypto.randomBytes(32).toString("hex");
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 минут
 
-    // Сохраняем токен в Supabase
+    // Сохраняем токен в Supabase со статусом "waiting"
     const { error } = await supabase.from("auth_tokens").insert({
       token,
       expires_at: expiresAt,
+      status: "waiting", // новый токен, ожидает использования
     });
 
     if (error) {
       console.error("Error saving auth token:", error);
-      // Если таблицы нет, создадим её на лету или просто вернём токен
-      // Для простоты, если таблицы нет - просто возвращаем токен
-      return NextResponse.json({ 
-        token,
-        expiresAt,
-      });
+      // Если таблицы нет или нет нужных полей, возвращаем ошибку
+      // Необходимо выполнить миграцию supabase_auth_tokens_migration.sql
+      return NextResponse.json(
+        { 
+          error: "Failed to save token. Please run supabase_auth_tokens_migration.sql migration.",
+          details: error.message 
+        },
+        { status: 500 }
+      );
     }
 
     return NextResponse.json({ 

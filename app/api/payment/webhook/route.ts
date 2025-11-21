@@ -1,11 +1,57 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { YooKassaWebhookNotification, verifyYooKassaWebhookSignature, captureYooKassaPayment } from "@/lib/yookassa";
+import { YooKassaWebhookNotification, captureYooKassaPayment } from "@/lib/yookassa";
 
 /**
  * Webhook для обработки уведомлений от ЮKassa
  * Документация: https://yookassa.ru/developers/payment-acceptance/getting-started/payment-process#webhook
  */
+/**
+ * Проверяет, принадлежит ли IP-адрес диапазонам YooKassa
+ */
+function isYooKassaIP(ip: string): boolean {
+  // Список IP-адресов и диапазонов YooKassa
+  // Документация: https://yookassa.ru/developers/using-api/webhooks#security
+  const yooKassaRanges = [
+    { start: "185.71.76.0", end: "185.71.76.31" }, // 185.71.76.0/27
+    { start: "185.71.77.0", end: "185.71.77.31" }, // 185.71.77.0/27
+    { start: "77.75.153.0", end: "77.75.153.127" }, // 77.75.153.0/25
+    { start: "77.75.154.128", end: "77.75.154.255" }, // 77.75.154.128/25
+  ];
+  
+  const yooKassaSingleIPs = [
+    "77.75.156.11",
+    "77.75.156.35",
+  ];
+
+  // Проверяем точные совпадения
+  if (yooKassaSingleIPs.includes(ip)) {
+    return true;
+  }
+
+  // Проверяем диапазоны (упрощенная проверка для IPv4)
+  const ipParts = ip.split(".").map(Number);
+  if (ipParts.length !== 4) {
+    return false; // Не IPv4, пропускаем проверку (можно добавить проверку IPv6)
+  }
+
+  for (const range of yooKassaRanges) {
+    const [start1, start2, start3, start4] = range.start.split(".").map(Number);
+    const [end1, end2, end3, end4] = range.end.split(".").map(Number);
+    
+    if (
+      ipParts[0] >= start1 && ipParts[0] <= end1 &&
+      ipParts[1] >= start2 && ipParts[1] <= end2 &&
+      ipParts[2] >= start3 && ipParts[2] <= end3 &&
+      ipParts[3] >= start4 && ipParts[3] <= end4
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const secretKey = process.env.YOOKASSA_SECRET_KEY?.trim() || "";
@@ -15,33 +61,55 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Server configuration error" }, { status: 500 });
     }
 
-    // Проверка IP-адреса согласно документации YooKassa
-    // https://yookassa.ru/developers/using-api/webhooks
-    const clientIp = request.headers.get("x-forwarded-for")?.split(",")[0] || 
-                     request.headers.get("x-real-ip") || 
-                     "unknown";
+    // Получаем тело запроса
+    const requestBody = await request.text();
     
-    const yooKassaIps = [
-      "185.71.76.0/27",
-      "185.71.77.0/27", 
-      "77.75.153.0/25",
-      "77.75.156.11",
-      "77.75.156.35",
-      "77.75.154.128/25",
-      "2a02:5180::/32"
-    ];
-    
-    // В продакшене проверяйте IP, для ngrok/dev можно временно отключить
-    const isLocalDev = process.env.NODE_ENV === "development" || request.url.includes("localhost") || request.url.includes("ngrok");
-    
-    if (!isLocalDev) {
-      // TODO: Реализовать проверку IP-адреса в продакшене
-      // Для ngrok это не критично, так как ngrok сам фильтрует запросы
-      console.log(`🌐 Webhook request from IP: ${clientIp}`);
+    if (!requestBody) {
+      console.error("❌ Empty webhook request body");
+      return NextResponse.json({ error: "Empty request body" }, { status: 400 });
     }
 
+    // Проверка IP-адреса согласно документации YooKassa
+    // Документация: https://yookassa.ru/developers/using-api/webhooks#security
+    // YooKassa рекомендует проверять IP-адрес отправителя для защиты от поддельных уведомлений
+    const clientIp = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || 
+                     request.headers.get("x-real-ip") || 
+                     request.headers.get("cf-connecting-ip") || // Cloudflare
+                     "unknown";
+    
+    // В продакшене проверяем IP, для ngrok/dev можно временно отключить
+    const isLocalDev = process.env.NODE_ENV === "development" || 
+                       request.url.includes("localhost") || 
+                       request.url.includes("ngrok") ||
+                       process.env.ALLOW_WEBHOOK_FROM_ANY_IP === "true";
+    
+    if (!isLocalDev) {
+      // В production проверяем IP-адрес согласно документации YooKassa
+      const isValidIP = isYooKassaIP(clientIp);
+      if (!isValidIP) {
+        console.error("❌ Webhook request from unauthorized IP:", clientIp);
+        console.error("❌ Allowed IP ranges: 185.71.76.0/27, 185.71.77.0/27, 77.75.153.0/25, 77.75.154.128/25, 77.75.156.11, 77.75.156.35");
+        return NextResponse.json(
+          { error: "Unauthorized IP address" },
+          { status: 403 }
+        );
+      }
+      console.log(`✅ Webhook request from authorized YooKassa IP: ${clientIp}`);
+    } else {
+      console.log(`🌐 Webhook request from IP: ${clientIp} (dev mode, IP check skipped)`);
+    }
+    
+    // Дополнительно рекомендуется проверить статус объекта после получения уведомления
+    // (см. документацию: https://yookassa.ru/developers/using-api/webhooks#security)
+
     // Парсим уведомление от ЮKassa
-    const notification: YooKassaWebhookNotification = await request.json();
+    let notification: YooKassaWebhookNotification;
+    try {
+      notification = JSON.parse(requestBody);
+    } catch (error) {
+      console.error("❌ Invalid JSON in webhook body:", error);
+      return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+    }
 
     console.log("📨 YooKassa webhook received:", {
       type: notification.type,
@@ -51,8 +119,7 @@ export async function POST(request: NextRequest) {
       amount: notification.object.amount.value,
     });
 
-    // Проверяем подпись уведомления (в реальной реализации нужно проверить заголовок)
-    // Для упрощения здесь проверяем только структуру
+    // Проверяем структуру уведомления
     if (notification.type !== "notification" || !notification.object) {
       console.error("❌ Invalid webhook notification structure");
       return NextResponse.json({ error: "Invalid notification" }, { status: 400 });
@@ -294,18 +361,24 @@ export async function POST(request: NextRequest) {
           });
         }
       }
-      // Платеж отменен
-      if (payment.status !== "canceled") {
-        console.log(`❌ Payment ${payment.id} canceled`);
+    } else if (notification.event === "payment.canceled" && status === "canceled") {
+      // Платеж отменен YooKassa
+      // Используем статус "failed" вместо "canceled", так как constraint в БД разрешает только pending/completed/failed
+      if (payment.status !== "failed" && payment.status !== "canceled") {
+        console.log(`❌ Payment ${payment.id} canceled by YooKassa, updating status to failed`);
 
         const { error: updateError } = await supabase
           .from("payments")
-          .update({ status: "canceled" })
+          .update({ status: "failed" })
           .eq("id", payment.id);
 
         if (updateError) {
           console.error("❌ Error updating payment status:", updateError);
+        } else {
+          console.log(`✅ Payment ${payment.id} status updated to failed`);
         }
+      } else {
+        console.log(`ℹ️ Payment ${payment.id} already has status: ${payment.status}`);
       }
     }
 

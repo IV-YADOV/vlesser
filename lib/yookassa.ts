@@ -46,6 +46,7 @@ export interface YooKassaPaymentResponse {
     confirmation_url: string; // URL для редиректа на оплату
   };
   created_at: string; // ISO 8601
+  expires_at?: string; // ISO 8601 - время истечения платежа (обычно 15 минут после создания)
   metadata?: Record<string, string>;
 }
 
@@ -113,16 +114,30 @@ export async function createYooKassaPayment(
     capture: true, // Автоматическое подтверждение (capture) после оплаты
   };
 
-  // ВАЖНО: Receipt не передаем, если он не передан явно
-  // Если YooKassa требует receipt (обязательная отправка чеков), его нужно добавить в вызов функции
-  // Для большинства случаев receipt не требуется
-  if (receipt && typeof receipt === 'object' && Array.isArray(receipt.items) && receipt.items.length > 0) {
-    // Добавляем receipt только если он валиден (есть items)
-    paymentRequest.receipt = receipt;
-    console.log("📋 Receipt included in payment request with", receipt.items.length, "items");
+  // Добавляем receipt в запрос, если он передан
+  // ВАЖНО: Если YooKassa требует receipt (обязательная отправка чеков), он должен быть валидным
+  if (receipt && typeof receipt === 'object') {
+    // Проверяем, что receipt валиден
+    if (Array.isArray(receipt.items) && receipt.items.length > 0) {
+      // Проверяем, что все обязательные поля присутствуют
+      const firstItem = receipt.items[0];
+      if (firstItem.description && firstItem.quantity && firstItem.amount && firstItem.amount.value && firstItem.amount.currency) {
+        paymentRequest.receipt = receipt;
+        console.log("📋 Receipt included in payment request:", {
+          itemsCount: receipt.items.length,
+          customerEmail: receipt.customer?.email || "not provided",
+          totalAmount: firstItem.amount.value,
+          vatCode: firstItem.vat_code || "not set",
+        });
+      } else {
+        console.error("❌ Receipt items are invalid, missing required fields");
+        console.error("❌ Required fields: description, quantity, amount.value, amount.currency");
+      }
+    } else {
+      console.error("❌ Receipt items array is empty or invalid");
+    }
   } else {
-    // Явно НЕ добавляем receipt в запрос
-    // Это предотвращает ошибку "Receipt is missing or illegal" если receipt не требуется
+    // Receipt не передан - это нормально, если YooKassa не требует его
     console.log("📋 Receipt not included in payment request");
     console.log("📋 Note: If YooKassa requires receipts, you need to pass valid receipt with customer and items");
   }
@@ -202,32 +217,149 @@ export async function createYooKassaPayment(
 }
 
 /**
- * Проверяет подпись webhook уведомления от ЮKassa (MD5)
+ * Проверяет подпись webhook уведомления от ЮKassa
+ * YooKassa использует HMAC-SHA256 подпись в заголовке "signature" или "X-Content-HMAC-SHA256"
+ * Формат подписи: "v1 <payment_id> <algorithm> <signature_base64>" или просто hex/base64 строка
+ * Документация: https://yookassa.ru/developers/using-api/webhooks#security
  */
 export function verifyYooKassaWebhookSignature(
-  notification: YooKassaWebhookNotification,
+  requestBody: string, // Тело запроса как строка (до парсинга JSON)
+  receivedSignature: string | null, // Подпись из заголовка
   secretKey: string
 ): boolean {
-  // ЮKassa использует MD5 подпись для webhook уведомлений
-  // Формула: MD5(event + "&" + object.id + "&" + object.status + "&" + secretKey)
-  const signatureString = `${notification.event}&${notification.object.id}&${notification.object.status}&${secretKey}`;
+  if (!receivedSignature) {
+    console.error("❌ YooKassa webhook signature missing");
+    return false;
+  }
+
+  if (!secretKey) {
+    console.error("❌ YooKassa secret key is not set");
+    return false;
+  }
+
+  // Парсим полученную подпись
+  let receivedSignatureBytes: Buffer;
+  let calculatedSignatureBytes: Buffer;
+  let signatureFormat: "v1" | "hex" | "base64" = "hex";
   
-  const calculatedSignature = crypto
-    .createHash("md5")
-    .update(signatureString, "utf-8")
-    .digest("hex")
-    .toLowerCase();
+  // Проверяем формат "v1 <payment_id> <algorithm> <signature_base64>"
+  const v1FormatMatch = receivedSignature.match(/^v1\s+(\S+)\s+(\d+)\s+(.+)$/);
+  
+  if (v1FormatMatch) {
+    // Новый формат YooKassa: v1 <payment_id> <algorithm> <signature_base64>
+    const [, paymentId, algorithm, signatureBase64] = v1FormatMatch;
+    signatureFormat = "v1";
+    
+    console.log("📋 Detected YooKassa v1 signature format:", {
+      paymentId,
+      algorithm,
+      signatureLength: signatureBase64.length,
+    });
+    
+    // Проверяем алгоритм (1 = HMAC-SHA256)
+    if (algorithm !== "1") {
+      console.error("❌ Unsupported signature algorithm:", algorithm);
+      return false;
+    }
+    
+    try {
+      // Декодируем base64 подпись в байты
+      receivedSignatureBytes = Buffer.from(signatureBase64, "base64");
+    } catch (error) {
+      console.error("❌ Error decoding base64 signature:", error);
+      return false;
+    }
+    
+    // Для формата v1 вычисляем подпись в base64
+    const calculatedSignatureBase64 = crypto
+      .createHmac("sha256", secretKey)
+      .update(requestBody, "utf-8")
+      .digest("base64");
+    
+    try {
+      calculatedSignatureBytes = Buffer.from(calculatedSignatureBase64, "base64");
+    } catch (error) {
+      console.error("❌ Error converting calculated base64 signature to Buffer:", error);
+      return false;
+    }
+  } else {
+    // Старый формат: hex строка (64 символа) или base64
+    const receivedSignatureTrimmed = receivedSignature.trim();
+    
+    // Проверяем, является ли это hex строкой (64 символа)
+    if (/^[a-f0-9]{64}$/i.test(receivedSignatureTrimmed)) {
+      signatureFormat = "hex";
+      
+      try {
+        receivedSignatureBytes = Buffer.from(receivedSignatureTrimmed, "hex");
+      } catch (error) {
+        console.error("❌ Error converting hex signature to Buffer:", error);
+        return false;
+      }
+      
+      // Для hex формата вычисляем подпись в hex
+      const calculatedSignatureHex = crypto
+        .createHmac("sha256", secretKey)
+        .update(requestBody, "utf-8")
+        .digest("hex")
+        .toLowerCase();
+      
+      try {
+        calculatedSignatureBytes = Buffer.from(calculatedSignatureHex, "hex");
+      } catch (error) {
+        console.error("❌ Error converting calculated hex signature to Buffer:", error);
+        return false;
+      }
+    } else {
+      // Пробуем как base64 (без префикса v1)
+      signatureFormat = "base64";
+      
+      try {
+        receivedSignatureBytes = Buffer.from(receivedSignatureTrimmed, "base64");
+      } catch (error) {
+        console.error("❌ Invalid signature format (not v1, not hex, not base64):", {
+          receivedLength: receivedSignatureTrimmed.length,
+          receivedPreview: receivedSignatureTrimmed.substring(0, 30) + "...",
+        });
+        return false;
+      }
+      
+      // Для base64 формата вычисляем подпись в base64
+      const calculatedSignatureBase64 = crypto
+        .createHmac("sha256", secretKey)
+        .update(requestBody, "utf-8")
+        .digest("base64");
+      
+      try {
+        calculatedSignatureBytes = Buffer.from(calculatedSignatureBase64, "base64");
+      } catch (error) {
+        console.error("❌ Error converting calculated base64 signature to Buffer:", error);
+        return false;
+      }
+    }
+  }
+  
+  // Проверяем длину буферов
+  if (calculatedSignatureBytes.length !== receivedSignatureBytes.length) {
+    console.error("❌ Signature length mismatch:", {
+      format: signatureFormat,
+      calculated: calculatedSignatureBytes.length,
+      received: receivedSignatureBytes.length,
+    });
+    return false;
+  }
+  
+  // Используем timingSafeEqual для защиты от timing attacks
+  const isValid = crypto.timingSafeEqual(calculatedSignatureBytes, receivedSignatureBytes);
 
   console.log("🔐 YooKassa webhook signature verification:", {
-    event: notification.event,
-    paymentId: notification.object.id,
-    status: notification.object.status,
-    signatureStringLength: signatureString.length,
+    format: signatureFormat,
+    isValid,
+    bodyLength: requestBody.length,
+    signatureLength: receivedSignatureBytes.length,
   });
 
-  // В реальной реализации нужно сравнить с подписью из заголовка запроса
-  // Для упрощения здесь проверяем только структуру уведомления
-  return true; // TODO: Реализовать проверку подписи из заголовка
+  return isValid;
 }
 
 /**
